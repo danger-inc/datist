@@ -7,7 +7,7 @@
 import base64, datetime as dt, hashlib, http.server, json, os, secrets, socket, threading, time
 import urllib.error, urllib.parse, urllib.request
 
-from tudd import TZ, TZ_NAME, guess_cat
+from raster import TZ, TZ_NAME, guess_cat
 import store as st
 
 CONFIG = os.path.expanduser("~/.config/kalender")

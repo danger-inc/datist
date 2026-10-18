@@ -1,4 +1,4 @@
-# Zeitraster der TU Dresden (Doppelstunden), Kalenderwochen, Veranstaltungstypen.
+# Zeitraster der TU Berlin (Doppelstunden), Kalenderwochen, Veranstaltungstypen.
 import datetime as dt
 import re
 from zoneinfo import ZoneInfo

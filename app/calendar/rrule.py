@@ -5,7 +5,7 @@
 import calendar
 import datetime as dt
 
-from tudd import TZ, WEEKDAYS, WEEKDAYS_LONG, MONTHS
+from raster import TZ, WEEKDAYS, WEEKDAYS_LONG, MONTHS
 
 DAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"]
 

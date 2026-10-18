@@ -1,6 +1,6 @@
 # datist
 
-Kalender im Terminal-Look der Suite (GTK4): Wochen- und Monatsansicht mit dem Stundenraster der TU Dresden
+Kalender im Terminal-Look der Suite (GTK4): Wochen- und Monatsansicht mit dem Stundenraster der TU Berlin
 (Doppelstunden, Kalenderwochen gerade/ungerade), Kategorien, Wiederholungen, Offline-Speicher und Abgleich mit
 Google Kalender.
 

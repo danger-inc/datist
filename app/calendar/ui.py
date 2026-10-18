@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# datist – TUI-Kalender im musicalist-Stil (Super+K). Ansichten Tag/Woche/Monat im DS-Raster der TU Dresden,
+# datist – TUI-Kalender im musicalist-Stil (Super+K). Ansichten Tag/Woche/Monat im DS-Raster der TU Berlin,
 # Google-Kalender-Abgleich (gcal.py) mit Offline-Cache (store.py), Farben live aus matugen.
 # Tasten: h/j/k/l bewegen, H/L Zeitraum, d/w/m Ansicht, t heute, n neu, a Schnelleingabe, ⏎ bearbeiten,
 #         x löschen, Tab nächster Termin, g Datum, s abgleichen, ? Hilfe, Esc schließen.
@@ -17,8 +17,8 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango, PangoCairo
 
 import tui
 from tui import label, hbox, vbox, esc
-import tudd
-from tudd import DS, TZ, WEEKDAYS, WEEKDAYS_LONG, MONTHS, CATS, CAT_NAMES, CAT_SHORT
+import raster
+from raster import DS, TZ, WEEKDAYS, WEEKDAYS_LONG, MONTHS, CATS, CAT_NAMES, CAT_SHORT
 import rrule
 import store as st
 import gcal
@@ -400,10 +400,10 @@ class Editor(Gtk.Box):
             e.connect("changed", lambda *_: self.sync_ds())
         self.allday = tui.Check("ganztägig", callback=lambda on: self.on_allday(on))
         row("zeit", hbox(self.t_from, label("–", "dim"), self.t_to, spacing=6), self.allday, wrap=True)
-        self.loc = tui.Entry("Hörsaal, z. B. POT/81/H", activate=self.save)
+        self.loc = tui.Entry("Hörsaal, z. B. MA/041", activate=self.save)
         self.loc_pick = tui.Select(lambda v: self.loc.set_text(v), tooltip="zuletzt benutzte Orte", max_chars=1)
         row("ort", self.loc, self.loc_pick)
-        self.link = tui.Entry("OPAL / BigBlueButton / Zoom …", activate=self.save)
+        self.link = tui.Entry("ISIS / BigBlueButton / Zoom …", activate=self.save)
         row("link", self.link, tui.Button("öffnen", self.open_link))
         self.notes = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, accepts_tab=False, hexpand=True)
         nb = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, min_content_height=52, max_content_height=110,
@@ -443,7 +443,7 @@ class Editor(Gtk.Box):
         new = ev is None
         if new:
             day = day or dt.date.today()
-            a, e = tudd.ds_times(ds or 1)
+            a, e = raster.ds_times(ds or 1)
             ev = {"cal": app.store.default_cal(), "title": "", "allday": False,
                   "start": st.iso(dt.datetime.combine(day, a)), "end": st.iso(dt.datetime.combine(day, e)),
                   "location": "", "link": "", "notes": "", "cat": "", "tone": "", "rrule": None}
@@ -464,7 +464,7 @@ class Editor(Gtk.Box):
     def fill(self, ev):
         app = self.app
         self.title.set_text(ev.get("title", ""))
-        self.cat.set_options([(k, f"{s} {n}") for k, n, s, _ in CATS], ev.get("cat") or tudd.guess_cat(ev.get("title")))
+        self.cat.set_options([(k, f"{s} {n}") for k, n, s, _ in CATS], ev.get("cat") or raster.guess_cat(ev.get("title")))
         self.tone.set_options([("", "auto (typ)")] + TONES, ev.get("tone") or "")
         cals = app.store.writable()
         if ev.get("gid") or ev.get("uid", "").startswith("local-"):
@@ -474,7 +474,7 @@ class Editor(Gtk.Box):
         s, e = st.parse_when(ev["start"], allday), st.parse_when(ev["end"], allday)
         if allday:
             e -= dt.timedelta(days=1)
-        self.date.set_text(tudd.fmt_date(s.date()))
+        self.date.set_text(raster.fmt_date(s.date()))
         self.t_from.set_text("" if allday else f"{s:%H:%M}")
         self.t_to.set_text("" if allday else f"{e:%H:%M}")
         self.allday.set_active(allday)
@@ -503,7 +503,7 @@ class Editor(Gtk.Box):
     # ----- Felder -----
     def on_title(self, *_):
         if not self.cat_manual:
-            self.cat.set_options(self.cat.options, tudd.guess_cat(self.title.get_text()))
+            self.cat.set_options(self.cat.options, raster.guess_cat(self.title.get_text()))
 
     def on_cat(self, v):
         self.cat_manual = True
@@ -528,15 +528,15 @@ class Editor(Gtk.Box):
 
     def day(self):
         try:
-            return tudd.parse_date(self.date.get_text())
+            return raster.parse_date(self.date.get_text())
         except ValueError:
             return None
 
     def pick_ds(self, n, extend=False):
-        a, e = tudd.ds_times(n)
+        a, e = raster.ds_times(n)
         if extend and self.t_from.get_text():
             try:
-                first = tudd.parse_time(self.t_from.get_text())
+                first = raster.parse_time(self.t_from.get_text())
                 if a > first:
                     a = first
             except ValueError:
@@ -548,7 +548,7 @@ class Editor(Gtk.Box):
 
     def sync_ds(self):
         try:
-            a, e = tudd.parse_time(self.t_from.get_text()), tudd.parse_time(self.t_to.get_text())
+            a, e = raster.parse_time(self.t_from.get_text()), raster.parse_time(self.t_to.get_text())
         except ValueError:
             a = e = None
         for (n, s, f), b in zip(DS, self.ds_btns):
@@ -563,7 +563,7 @@ class Editor(Gtk.Box):
             return None, d
         until = None
         if self.until.get_text().strip():
-            until = tudd.parse_date(self.until.get_text())
+            until = raster.parse_date(self.until.get_text())
         if pid == "custom":
             r = self.custom.get_text().strip()
             if r.upper().startswith("RRULE:"):
@@ -576,8 +576,8 @@ class Editor(Gtk.Box):
     def update_hint(self):
         d = self.day()
         if d:
-            par = tudd.parity(d)
-            self.date_hint.set_label(f"→ {WEEKDAYS_LONG[d.weekday()]}, {d.day}. {MONTHS[d.month - 1]} · KW {tudd.kw(d)} {par}")
+            par = raster.parity(d)
+            self.date_hint.set_label(f"→ {WEEKDAYS_LONG[d.weekday()]}, {d.day}. {MONTHS[d.month - 1]} · KW {raster.kw(d)} {par}")
         else:
             self.date_hint.set_label("→ ? (heute, morgen, mi, +3, 20.10.)")
         if self.ev and self.ev.get("series") and self.scope != "series":
@@ -587,7 +587,7 @@ class Editor(Gtk.Box):
             r, start = self.rule()
             txt = rrule.describe(r, dt.datetime.combine(start, dt.time())) if r else "einmalig"
             if r and start and d and start != d:
-                txt += f" · beginnt {tudd.fmt_date(start)} (passende KW)"
+                txt += f" · beginnt {raster.fmt_date(start)} (passende KW)"
             if r and "INTERVAL=2" in r and "WEEKLY" in r:
                 txt += " · Achtung: 2026 hat KW 53 – über den Jahreswechsel kippt die Parität, " \
                        "dafür „jede gerade/ungerade KW (exakt)“ wählen"
@@ -665,8 +665,8 @@ class Editor(Gtk.Box):
             ev["start"] = d.isoformat()
             ev["end"] = (d + dt.timedelta(days=1)).isoformat()
         else:
-            a = tudd.parse_time(self.t_from.get_text())
-            e = tudd.parse_time(self.t_to.get_text())
+            a = raster.parse_time(self.t_from.get_text())
+            e = raster.parse_time(self.t_to.get_text())
             s, f = dt.datetime.combine(d, a), dt.datetime.combine(d, e)
             if f <= s:
                 f += dt.timedelta(days=1) if e < a else dt.timedelta(minutes=90)
@@ -721,6 +721,7 @@ class Kalender(Gtk.Application):
             return
         if not self.win:
             self.build()
+        getattr(tui.glass, "bring_here", lambda w: None)(self.win)   # offen auf anderem Arbeitsbereich → hierher holen
         self.win.present()
         self.focus_view()
 
@@ -771,6 +772,18 @@ class Kalender(Gtk.Application):
                                            vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
                                            child=win.topbar)
         root.prepend(self.top_clip)
+        # Tastenhinweise auch im kleinen Fenster: abschneiden statt ausblenden (bestimmen nie die Mindestbreite)
+        win.statusbar.remove(win.hint_box)
+        self.hint_clip = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL,
+                                            vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_width=True,
+                                            propagate_natural_height=True, child=win.hint_box)
+        win.statusbar.append(self.hint_clip)
+        win.on_compact = lambda compact: win.hint_box.set_visible(True)
+        # Abgleich-Anzeige (✓ 14:32 …): Klick = jetzt mit Google abgleichen
+        sc = Gtk.GestureClick()
+        sc.connect("released", lambda *_: self.sync(force=True))
+        self.sync_badge.add_controller(sc)
+        self.sync_badge.set_cursor(Gdk.Cursor.new_from_name("pointer"))
 
         self.views = {}
         for v in ("day", "week", "month"):
@@ -790,7 +803,7 @@ class Kalender(Gtk.Application):
         self.apply_see_through()
         win.content.append(self.overlay)
         # Schnelleingabe
-        self.quick = tui.Entry("schnell: V Mathe mi 2ds @POT/81/H #v !u bis 5.2.   (esc abbrechen)",
+        self.quick = tui.Entry("schnell: V Mathe mi 2ds @MA/041 #v !u bis 5.2.   (esc abbrechen)",
                                activate=self.quick_add)
         self.quick_rev = Gtk.Revealer(child=hbox(label("󰐕", "accent"), self.quick, spacing=8),
                                       transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
@@ -873,8 +886,10 @@ class Kalender(Gtk.Application):
         top = self.win.topbar.get_child()
         c = top.get_first_child()
         while c:
-            if c.has_css_class("brand") or c.has_css_class("glass-toggle"):
-                c.set_visible(not compact)        # sonst bleibt das Fenster über der nächsten Stufe hängen
+            if c.has_css_class("brand"):          # App-Name oben links (wie filist), erst ganz schmal weg
+                c.set_visible(not tiny)
+            elif c.has_css_class("glass-toggle"):
+                c.set_visible(not compact)
             c = c.get_next_sibling()
         self.prev_btn.set_visible(not tiny)
         self.next_btn.set_visible(not tiny)
@@ -900,12 +915,12 @@ class Kalender(Gtk.Application):
     # ----- Zustand -----
     def current_slot(self):
         now = dt.datetime.now()
-        n = tudd.ds_of(now.time())
+        n = raster.ds_of(now.time())
         if n:
             return n - 1
         m = now.hour * 60 + now.minute
         for i, (_, a, b) in enumerate(DS):
-            if m < tudd.minutes(a):
+            if m < raster.minutes(a):
                 return i
         return 6
 
@@ -920,11 +935,11 @@ class Kalender(Gtk.Application):
 
     def update_header(self):
         d = self.cursor
-        even = tudd.kw(d) % 2 == 0
+        even = raster.kw(d) % 2 == 0
         if self.header_compact:
-            self.kw_badge.set_label(f"KW {tudd.kw(d)} {'g' if even else 'u'}")
+            self.kw_badge.set_label(f"KW {raster.kw(d)} {'g' if even else 'u'}")
         else:
-            self.kw_badge.set_label(f"KW {tudd.kw(d)} · {'gerade' if even else 'ungerade'}")
+            self.kw_badge.set_label(f"KW {raster.kw(d)} · {'gerade' if even else 'ungerade'}")
         self.kw_badge.set_css_classes(["kw-badge", "even" if even else "odd"])
         n = len(self.store.pending)
         exp = gcal.logged_in() and gcal.expired()
@@ -947,10 +962,13 @@ class Kalender(Gtk.Application):
             s = f"✓ {t:%H:%M}"
         else:
             s = "○ noch nicht abgeglichen"
-        self.sync_badge.set_tooltip_text(s)
+        tips = {"✓": f"mit Google abgeglichen, zuletzt um {s[2:]} Uhr", "◆": "nur lokal – nicht bei Google angemeldet",
+                "⟳": "Änderungen warten auf den Abgleich", "○": "noch nicht mit Google abgeglichen"}
+        self.sync_badge.set_tooltip_text((s if self.syncing else tips.get(s[:1], s)) + (" · klicken = jetzt abgleichen (strg+r)"
+                                                               if gcal.logged_in() else ""))
         self.sync_badge.set_visible(not exp)        # bei abgelaufener Anmeldung reicht der ⚠-Knopf
-        if self.header_compact:
-            s = s.split(" ")[0]                  # schmal: nur das Symbol, Text im Tooltip
+        if self.header_compact and not s.startswith("✓"):
+            s = s.split(" ")[0]                  # schmal: nur das Symbol, Text im Tooltip (Uhrzeit bleibt)
         self.sync_badge.set_label(s)
 
     # ----- Abgleich -----
@@ -1032,20 +1050,20 @@ class Kalender(Gtk.Application):
         pauses=False: Pausen bekommen keine eigene Zeile (sehr niedrige Fenster)."""
         segs, r = [], 0
         if early:
-            segs.append(("early", 0, 0, tudd.minutes(DS[0][1]), r, 1))
+            segs.append(("early", 0, 0, raster.minutes(DS[0][1]), r, 1))
             r += 1
         for i, (n, a, b) in enumerate(DS):
             kk = k + (1 if i < extra else 0)
-            segs.append(("ds", n, tudd.minutes(a), tudd.minutes(b), r, kk))
+            segs.append(("ds", n, raster.minutes(a), raster.minutes(b), r, kk))
             r += kk
             if i < len(DS) - 1:
                 if pauses:
-                    segs.append(("pause", n, tudd.minutes(b), tudd.minutes(DS[i + 1][1]), r, 1))
+                    segs.append(("pause", n, raster.minutes(b), raster.minutes(DS[i + 1][1]), r, 1))
                     r += 1
                 else:
-                    segs.append(("pause", n, tudd.minutes(b), tudd.minutes(DS[i + 1][1]), r, 0))
+                    segs.append(("pause", n, raster.minutes(b), raster.minutes(DS[i + 1][1]), r, 0))
         if late:
-            segs.append(("late", 0, tudd.minutes(DS[-1][2]), 24 * 60, r, 1))
+            segs.append(("late", 0, raster.minutes(DS[-1][2]), 24 * 60, r, 1))
             r += 1
         return segs, r
 
@@ -1126,7 +1144,7 @@ class Kalender(Gtk.Application):
     # ----- Woche -----
     def week_days(self, cols=None, gut=8):
         """Sichtbare Tage: ganze Woche, bei wenig Breite Mo–Fr, 3 Tage um den Cursor oder nur der Cursor-Tag."""
-        ws = tudd.week_start(self.cursor)
+        ws = raster.week_start(self.cursor)
         full = [ws + dt.timedelta(days=i) for i in range(7 if self.store.settings.get("weekend", True) else 5)]
         if cols is None:
             return full
@@ -1168,7 +1186,7 @@ class Kalender(Gtk.Application):
         segs, grid_h = self.time_rows(k, early, late, extra, pauses)
         dw = max(4, (cols - gut - 1) // nd)
         width = min(cols, gut + dw * nd + 1)
-        kwn = tudd.kw(self.cursor)
+        kwn = raster.kw(self.cursor)
         even = kwn % 2 == 0
         par_col = p.primary if even else p.tones["tertiary"]
         title = f"KW {kwn} ◆ {'gerade' if even else 'ungerade'}" if width >= 30 else f"KW {kwn} {'g' if even else 'u'}"
@@ -1203,7 +1221,7 @@ class Kalender(Gtk.Application):
                 g.text(c + 1, 1, "▸", p.primary)
             g.region(c + 1, 1, dw - 1, 1, ("day", d))
         if nd < len(self.week_days()):               # Hinweis: es gibt weitere Tage links/rechts
-            if days[0] > tudd.week_start(self.cursor):
+            if days[0] > raster.week_start(self.cursor):
                 g.text(gut, 1, "‹", p.primary)
             if days[-1] < self.week_days()[-1]:
                 g.text(width - 2, 1, "›", p.primary)
@@ -1268,7 +1286,7 @@ class Kalender(Gtk.Application):
             rr, sh = r0 + cur[4], cur[5]
             g.fill(gut + i * dw + 1, rr, dw - 1, sh, p.primary, 0.09)
             g.text(gut + i * dw, rr, "▶", p.primary)
-        day_a, day_b = tudd.minutes(DS[0][1]), tudd.minutes(DS[-1][2])
+        day_a, day_b = raster.minutes(DS[0][1]), raster.minutes(DS[-1][2])
         for i, d in enumerate(days):
             items = [o for o in timed if o["s"].date() == d]
             for o, lane, nl in self.lanes(items):
@@ -1288,7 +1306,7 @@ class Kalender(Gtk.Application):
                 lw = max(1, (dw - 1) // nl)
                 c = gut + i * dw + 1 + lane * lw
                 w = lw if lane < nl - 1 else (dw - 1) - lane * lw
-                span = tudd.ds_span(o["s"].time(), o["e"].time())
+                span = raster.ds_span(o["s"].time(), o["e"].time())
                 sel = o["uid"] == self.focus_uid or (self.focus_uid is None and d == self.cursor and span and
                                                     span[0] <= self.slot + 1 <= span[1])
                 self.draw_event(g, o, c, top_r, w, h, sel)
@@ -1308,9 +1326,9 @@ class Kalender(Gtk.Application):
         d = self.cursor
         occ = self.occ(d, d + dt.timedelta(days=1))
         width = cols
-        even = tudd.kw(d) % 2 == 0
+        even = raster.kw(d) % 2 == 0
         title = f"{WEEKDAYS_LONG[d.weekday()]}, {d.day}. {MONTHS[d.month - 1]} {d.year}"
-        right = f"KW {tudd.kw(d)} ◆ {'gerade' if even else 'ungerade'}"
+        right = f"KW {raster.kw(d)} ◆ {'gerade' if even else 'ungerade'}"
         lines = []        # [(art, payload)]  – art: text/ds/pause/event
         allday = [o for o in occ if o.get("allday") or (o["e"] - o["s"]) >= dt.timedelta(hours=20)]
         timed = [o for o in occ if o not in allday]
@@ -1416,7 +1434,7 @@ class Kalender(Gtk.Application):
                     g.fill(c0, top, w, hh, col, 0.3 if sel else 0.13)
                     g.region(c0, top, w, hh, ("event", o))
                     if r >= 1:
-                        span = tudd.ds_span(o["s"].time(), o["e"].time())
+                        span = raster.ds_span(o["s"].time(), o["e"].time())
                         ds_txt = (f"{span[0]}. DS" if span[0] == span[1] else f"{span[0]}.–{span[1]}. DS") if span else ""
                         g.box(c0, r, w, h if r + h < rows else rows - r, col, 1.0 if sel else 0.85,
                               title=f"{CAT_NAMES.get(o.get('cat'), '')} · {o['title']}",
@@ -1452,7 +1470,7 @@ class Kalender(Gtk.Application):
     def render_month(self, g, cols, rows):
         p = self.pal
         first = self.cursor.replace(day=1)
-        start = tudd.week_start(first)
+        start = raster.week_start(first)
         weeks = 6
         end = start + dt.timedelta(days=7 * weeks)
         occ = self.occ(start, end)
@@ -1470,7 +1488,7 @@ class Kalender(Gtk.Application):
         sep = lines >= weeks * 3                       # Trennlinien zwischen Wochen nur, wenn Platz ist
         hh = max(1, lines // weeks)
         height = min(rows, 2 + hh * weeks + 1)
-        right = f"KW {tudd.kw(start)}–{tudd.kw(end - dt.timedelta(days=1))}"
+        right = f"KW {raster.kw(start)}–{raster.kw(end - dt.timedelta(days=1))}"
         g.box(0, 0, width, height, p.primary, 0.55, title=f"{MONTHS[first.month - 1]} {first.year}",
               title_color=p.fg, rounded=True, right=right)
         for i in range(7):
@@ -1482,7 +1500,7 @@ class Kalender(Gtk.Application):
         for w in range(weeks):
             r = 2 + w * hh
             wd0 = start + dt.timedelta(days=7 * w)
-            kwn = tudd.kw(wd0)
+            kwn = raster.kw(wd0)
             even = kwn % 2 == 0
             pc = p.primary if even else p.tones["tertiary"]
             body = r + (1 if sep else 0)              # erste Inhaltszeile
@@ -1507,6 +1525,7 @@ class Kalender(Gtk.Application):
                 inmonth = d.month == first.month
                 al = 1.0 if inmonth else 0.35
                 g.region(c, body, cw, bh, ("day", d))
+                g.region(c, body, min(cw, 4), 1, ("dayhead", d))
                 if d == self.cursor:
                     g.fill(c, body, cw, bh, p.primary, 0.16)
                 num = f"{d.day:>2}"
@@ -1529,6 +1548,7 @@ class Kalender(Gtk.Application):
                 if cw < 5:                     # schmale Zellen: ein farbiger Punkt je Termin
                     for j, o in enumerate(evs[:cw]):
                         g.text(c + j, body + 1, "▪", p.cat(o.get("cat"), o.get("tone")), al)
+                        g.region(c + j, body + 1, 1, 1, ("event", o))
                     continue
                 show = evs[:room] if len(evs) <= room else evs[:room - 1]
                 for j, o in enumerate(show):
@@ -1536,8 +1556,10 @@ class Kalender(Gtk.Application):
                     t = ("" if o.get("allday") or cw < 12 else f"{o['s']:%H:%M} ") + o["title"]
                     g.text(c, body + 1 + j, "▌", col, al)
                     g.text(c + 1, body + 1 + j, t, p.fg, 0.85 * al, maxw=cw - 1)
+                    g.region(c, body + 1 + j, cw, 1, ("event", o))
                 if len(evs) > room and room >= 2:
                     g.text(c + 1, body + room, f"+{len(evs) - len(show)} weitere", p.fg, 0.5 * al, maxw=cw - 1)
+                    g.region(c, body + room, cw, 1, ("dayhead", d))
         g.text(0, height - 1, "╰" + "─" * (width - 2) + "╯", p.primary, 0.55)
         for i in range(7):
             g.text(kwc + i * dw, height - 1, "┴", p.primary, 0.3)
@@ -1549,21 +1571,24 @@ class Kalender(Gtk.Application):
             self.focus_uid = o["uid"]
             self.cursor = o["s"].date()
             if o["s"].time() and not o.get("allday"):
-                span = tudd.ds_span(o["s"].time(), o["e"].time())
+                span = raster.ds_span(o["s"].time(), o["e"].time())
                 if span:
                     self.slot = span[0] - 1
-            if n >= 2 or view == "day" or button == 3:
-                self.edit(o)
+            self.edit(o)                     # ein Klick öffnet den Termin (in jeder Ansicht)
         elif kind == "slot":
             self.cursor, self.slot = hit[1], hit[2]
             self.focus_uid = None
             if n >= 2:
                 self.editor.open(day=self.cursor, ds=self.slot + 1)
-        elif kind == "day":
+        elif kind == "day":                  # Wochen-Kopf / Monatsfeld
             self.cursor = hit[1]
             self.focus_uid = None
-            if n >= 2:
+            if n >= 2 or view == "week":
                 self.win.show_tab("day")
+        elif kind == "dayhead":              # Monat: Tageszahl oder „+N weitere“ → Tagesansicht
+            self.cursor = hit[1]
+            self.focus_uid = None
+            self.win.show_tab("day")
         elif kind == "week":
             self.cursor = hit[1]
             self.win.show_tab("week")
@@ -1633,7 +1658,7 @@ class Kalender(Gtk.Application):
         i = uids.index(self.focus_uid) if self.focus_uid in uids else -1
         o = evs[(i + step) % len(evs)]
         self.focus_uid = o["uid"]
-        span = tudd.ds_span(o["s"].time(), o["e"].time()) if not o.get("allday") else None
+        span = raster.ds_span(o["s"].time(), o["e"].time()) if not o.get("allday") else None
         if span:
             self.slot = span[0] - 1
         self.redraw()
@@ -1644,7 +1669,7 @@ class Kalender(Gtk.Application):
         if o:
             return o
         for o in evs:
-            span = tudd.ds_span(o["s"].time(), o["e"].time()) if not o.get("allday") else None
+            span = raster.ds_span(o["s"].time(), o["e"].time()) if not o.get("allday") else None
             if span and span[0] <= self.slot + 1 <= span[1]:
                 return o
         return None
@@ -1751,7 +1776,7 @@ class Kalender(Gtk.Application):
     def open_quick(self, goto=False):
         self.quick_goto = goto
         self.quick.set_placeholder_text("gehe zu: heute, mi, +2w, 20.10., 2027-01-15" if goto else
-                                        "schnell: V Mathe mi 2ds @POT/81/H #v !u bis 5.2.   (esc abbrechen)")
+                                        "schnell: V Mathe mi 2ds @MA/041 #v !u bis 5.2.   (esc abbrechen)")
         self.quick.set_text("")
         self.quick_rev.set_reveal_child(True)
         GLib.idle_add(lambda: self.quick.grab_focus() and False)
@@ -1767,7 +1792,7 @@ class Kalender(Gtk.Application):
             return
         if self.quick_goto:
             try:
-                self.cursor = tudd.parse_date(text, self.cursor)
+                self.cursor = raster.parse_date(text, self.cursor)
             except ValueError as e:
                 self.win.say(str(e), error=True)
                 return
@@ -1789,7 +1814,7 @@ class Kalender(Gtk.Application):
         self.store.save_event(ev)
         self.cursor = st.parse_when(ev["start"], ev.get("allday")).date()
         self.close_quick()
-        self.after_edit(f"angelegt: {ev['title']} · {tudd.fmt_date(self.cursor)}"
+        self.after_edit(f"angelegt: {ev['title']} · {raster.fmt_date(self.cursor)}"
                         + (f" · {rrule.describe(ev['rrule'], st.parse_when(ev['start'], False))}" if ev.get("rrule") else ""))
 
     def parse_quick(self, text):
@@ -1812,9 +1837,9 @@ class Kalender(Gtk.Application):
                 a, b = int(m_ds.group(1)), int(m_ds.group(2) or m_ds.group(1))
                 if not (1 <= a <= 7 and 1 <= b <= 7):
                     raise ValueError("DS 1–7")
-                t_from, t_to = tudd.ds_times(a)[0], tudd.ds_times(b)[1]
+                t_from, t_to = raster.ds_times(a)[0], raster.ds_times(b)[1]
             elif m_t:
-                t_from, t_to = tudd.parse_time(m_t.group(1)), tudd.parse_time(m_t.group(2))
+                t_from, t_to = raster.parse_time(m_t.group(1)), raster.parse_time(m_t.group(2))
             elif t.startswith("@") and len(t) > 1:
                 loc = t[1:]
             elif t.startswith("#") and tl[1:] in cats:
@@ -1822,7 +1847,7 @@ class Kalender(Gtk.Application):
             elif tl in rules:
                 rule = rules[tl]
             elif tl == "bis" and i + 1 < len(toks):
-                until = tudd.parse_date(toks[i + 1])
+                until = raster.parse_date(toks[i + 1])
                 i += 1
             elif re.match(r"https?://|www\.", tl):
                 link = t
@@ -1831,7 +1856,7 @@ class Kalender(Gtk.Application):
                     if re.fullmatch(r"heute|morgen|übermorgen|[+-]\d+[dtw]?|\d{1,2}\.\d{1,2}\.?\d{0,4}|"
                                     r"(mo|di|mi|do|fr|sa|so)|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag",
                                     tl):
-                        day = tudd.parse_date(tl)
+                        day = raster.parse_date(tl)
                     else:
                         words.append(t)
                 except ValueError:
@@ -1839,12 +1864,12 @@ class Kalender(Gtk.Application):
             i += 1
         title = " ".join(words) or "(ohne Titel)"
         if t_from is None:
-            t_from, t_to = tudd.ds_times(self.slot + 1)
+            t_from, t_to = raster.ds_times(self.slot + 1)
         s, e = dt.datetime.combine(day, t_from), dt.datetime.combine(day, t_to)
         if e <= s:
             e = s + dt.timedelta(minutes=90)
         ev = {"cal": self.store.default_cal(), "title": title, "allday": False, "start": st.iso(s), "end": st.iso(e),
-              "location": loc, "link": link, "notes": "", "cat": cat or tudd.guess_cat(title), "tone": "", "rrule": None}
+              "location": loc, "link": link, "notes": "", "cat": cat or raster.guess_cat(title), "tone": "", "rrule": None}
         return ev, rule, until
 
     # =================================================================
@@ -1854,12 +1879,14 @@ class Kalender(Gtk.Application):
         rows = [("h j k l / ←↓↑→", "Tag bzw. Doppelstunde wechseln (Monat: Tag/Woche)"),
                 ("H L / [ ]", "voriger/nächster Zeitraum"), ("d w m", "Tag-, Wochen-, Monatsansicht"),
                 ("t", "heute"), ("g", "gehe zu Datum"), ("n", "neuer Termin im markierten DS"),
-                ("a", "Schnelleingabe:  V Mathe mi 2ds @POT/81/H #v !u bis 5.2."),
+                ("a", "Schnelleingabe:  V Mathe mi 2ds @MA/041 #v !u bis 5.2."),
                 ("⏎ / e", "markierten Termin bearbeiten"), ("tab", "nächster Termin des Tages"),
                 ("x x", "Termin löschen"), ("s / strg+r", "mit Google abgleichen"), ("+ −", "Schrift größer/kleiner"),
-                ("1–4", "Tabs"), ("esc", "schließen")]
+                ("1–4", "Tabs"), ("esc", "schließen"),
+                ("klick", "Termin öffnen · Wochentag → Tagesansicht · KW / Tageszahl im Monat → Woche / Tag"),
+                ("✓ 12:34 (oben)", "letzter Google-Abgleich – klicken = jetzt abgleichen")]
         quick = [("2ds  2-3ds  14-16", "Zeit: Doppelstunde(n) oder Uhrzeit"), ("mi  morgen  +3  20.10.", "Tag"),
-                 ("@POT/81/H", "Ort"), ("#v #ü #s #p #! #privat", "Typ"),
+                 ("@MA/041", "Ort"), ("#v #ü #s #p #! #privat", "Typ"),
                  ("!w !g !u !kg !ku !m", "wöchentl., 2-wö. gerade/ungerade, jede gerade/ungerade KW, monatl."),
                  ("bis 5.2.", "Serienende"), ("https://…", "Link")]
         p = tui.Panel("tasten")

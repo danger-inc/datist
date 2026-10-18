@@ -2,10 +2,10 @@
 Type=Application
 Name=datist
 GenericName=Kalender
-Comment=Kalender mit TU-Dresden-Stundenraster und Google-Abgleich
+Comment=Kalender mit TU-Berlin-Stundenraster und Google-Abgleich
 Exec=@EXEC@
 Icon=datist
 Terminal=false
 Categories=Office;Calendar;
-Keywords=datist;kalender;calendar;termine;stundenplan;tu dresden;ds;google;
+Keywords=datist;kalender;calendar;termine;stundenplan;tu berlin;ds;google;
 StartupWMClass=de.invincible.Datist

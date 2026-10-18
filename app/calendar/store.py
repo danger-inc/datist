@@ -14,7 +14,7 @@
 import copy, datetime as dt, json, os, uuid
 
 import rrule
-from tudd import TZ, guess_cat
+from raster import TZ, guess_cat
 
 DATA = os.path.expanduser("~/.local/share/kalender/data")   # bewusst nicht in rice-apps (Backup)
 LOCAL_CAL = {"id": "local", "name": "Lokal (nur dieser Rechner)", "color": None, "role": "owner"}
