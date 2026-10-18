@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Kalender
+GenericName=Kalender
+Comment=Kalender mit TU-Dresden-Stundenraster und Google-Abgleich
+Exec=@EXEC@
+Icon=kalender
+Terminal=false
+Categories=Office;Calendar;
+Keywords=kalender;calendar;termine;stundenplan;tu dresden;ds;google;
+StartupWMClass=de.invincible.Kalender

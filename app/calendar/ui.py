@@ -1,0 +1,2097 @@
+#!/usr/bin/env python3
+# kalender – TUI-Kalender im musicminus-Stil (Super+K). Ansichten Tag/Woche/Monat im DS-Raster der TU Dresden,
+# Google-Kalender-Abgleich (gcal.py) mit Offline-Cache (store.py), Farben live aus matugen.
+# Tasten: h/j/k/l bewegen, H/L Zeitraum, d/w/m Ansicht, t heute, n neu, a Schnelleingabe, ⏎ bearbeiten,
+#         x löschen, Tab nächster Termin, g Datum, s abgleichen, ? Hilfe, Esc schließen.
+import colorsys, copy, datetime as dt, math, os, re, sys, time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+sys.path.insert(1, os.path.dirname(HERE))           # rice-apps: tui, glass
+
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("PangoCairo", "1.0")
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango, PangoCairo
+
+import tui
+from tui import label, hbox, vbox, esc
+import tudd
+from tudd import DS, TZ, WEEKDAYS, WEEKDAYS_LONG, MONTHS, CATS, CAT_NAMES, CAT_SHORT
+import rrule
+import store as st
+import gcal
+
+APP_ID = "de.invincible.Kalender"
+SYNC_EVERY = 300          # Sekunden
+TONES = [("primary", "Primär"), ("analog", "Analog −60°"), ("analog2", "Analog +60°"), ("secondary", "Sekundär"),
+         ("tertiary", "Tertiär"), ("complement", "Komplementär"),
+         ("triad", "Triade"), ("triad2", "Triade 2"), ("alert", "Signal"), ("color2", "Grün"), ("color3", "Gelb"),
+         ("color4", "Blau"), ("color5", "Magenta"), ("color6", "Cyan")]
+
+CSS = """
+.kw-badge { padding: 1px 7px; border-radius: 4px; margin-right: 4px; }
+.kw-badge.even { background-color: @primary; color: @on_primary; }
+.kw-badge.odd { background-color: @tertiary; color: @background; }
+.sync-badge { color: @secondary; margin-right: 6px; }
+.editor-card { background-color: alpha(@background, 0.97); border-radius: 6px; padding: 4px 6px 10px 6px; }
+.glass .editor-card { background-color: alpha(@background, 0.97); }
+/* durchsichtige Fenster in der App (Konto → darstellung): Inhalt dahinter weichgezeichnet */
+.editor-card.see-through, .glass .editor-card.see-through {
+    background-color: alpha(@background, 0.55); backdrop-filter: blur(14px);
+}
+.flabel { color: @secondary; min-width: 64px; }
+button.ds { padding: 1px 7px; border: 1px solid alpha(@primary, 0.45); border-radius: 4px; background: none;
+    box-shadow: none; min-height: 0; min-width: 0; color: @foreground; }
+button.ds:hover { background-color: alpha(@primary, 0.18); }
+button.ds.on { background-color: @primary; color: @on_primary; border-color: @primary; }
+.notes-box { background-color: alpha(@background, 0.45); border: 1px solid alpha(@primary, 0.45); border-radius: 4px;
+    padding: 3px 8px; }
+.notes-box textview, .notes-box textview text { background: none; color: @foreground; }
+.quick { padding: 2px 14px 4px 14px; }
+.swatch { min-width: 26px; }
+.help { color: @foreground; }
+"""
+
+
+# =====================================================================
+# Farben: matugen-Palette + daraus abgeleitete Komplementär-/Triadenfarben (OKLCH)
+# =====================================================================
+def _lin(c):
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _gam(c):
+    c = max(0.0, min(1.0, c))
+    return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+
+
+def to_oklch(rgb):
+    r, g, b = (_lin(x) for x in rgb)
+    l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3)
+    m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3)
+    s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3)
+    L = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s
+    A = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s
+    B = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+    return L, math.hypot(A, B), math.degrees(math.atan2(B, A)) % 360
+
+
+def from_oklch(L, C, H):
+    for _ in range(30):     # Chroma senken, bis die Farbe in sRGB passt
+        A, B = C * math.cos(math.radians(H)), C * math.sin(math.radians(H))
+        l = (L + 0.3963377774 * A + 0.2158037573 * B) ** 3
+        m = (L - 0.1055613458 * A - 0.0638541728 * B) ** 3
+        s = (L - 0.0894841775 * A - 1.2914855480 * B) ** 3
+        r = 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s
+        g = -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s
+        b = -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s
+        if all(-0.001 <= x <= 1.001 for x in (r, g, b)):
+            break
+        C *= 0.9
+    return tuple(_gam(x) for x in (r, g, b))
+
+
+class Palette:
+    def __init__(self):
+        c = tui.colors()
+
+        def rgb(name, fb):
+            v = c.get(name)
+            return (v.red, v.green, v.blue) if v else fb
+        self.fg = rgb("foreground", (0.94, 0.87, 0.84))
+        self.bg = rgb("background", (0.1, 0.07, 0.05))
+        self.surface = rgb("surface_container", (0.15, 0.12, 0.1))
+        p = rgb("primary", (1.0, 0.71, 0.56))
+        self.on_primary = rgb("on_primary", (0.32, 0.13, 0.0))
+        L, C, H = to_oklch(p)
+        C = max(C, 0.09)
+        # Typen-Farben: gleichmäßig um den Primärton verteilt (gleiche Helligkeit/Sättigung wie matugen-primary)
+        used = [H, H - 60, H + 60, H + 120, H + 180]
+        # Signalfarbe (Prüfung): roter Bereich, möglichst weit weg von allen anderen Tönen
+        dist = lambda a, b: abs((a - b + 180) % 360 - 180)
+        alert_h = max((25, 5, 345, 40, 55, 330), key=lambda h: min(dist(h, u) for u in used))
+        self.tones = {"primary": p, "secondary": rgb("secondary", p), "tertiary": rgb("tertiary", p),
+                      "analog": from_oklch(L, C, H - 60), "analog2": from_oklch(L, C, H + 60),
+                      "complement": from_oklch(L, C, H + 180), "triad": from_oklch(L, C, H + 120),
+                      "triad2": from_oklch(L, C, H + 240),
+                      "alert": from_oklch(max(L, 0.68), max(C, 0.16), alert_h),
+                      "outline": rgb("outline", self.fg)}
+        for i in range(1, 7):
+            self.tones[f"color{i}"] = rgb(f"color{i}", p)
+        self.cat_tone = {k: src for k, _, _, src in CATS}
+
+    def cat(self, cat, tone=None):
+        if tone and tone in self.tones:
+            return self.tones[tone]
+        return self.tones.get(self.cat_tone.get(cat, "outline"), self.fg)
+
+    @property
+    def primary(self):
+        return self.tones["primary"]
+
+
+# =====================================================================
+# Zeichenraster: alles in Zeichenzellen (Monospace) wie im Terminal
+# =====================================================================
+class Cells(Gtk.DrawingArea):
+    def __init__(self, app, view):
+        super().__init__(hexpand=True, vexpand=True, focusable=True)
+        self.app, self.view = app, view
+        self.set_draw_func(self._draw)
+        self.regions = []
+        self.ops = []
+        self.off, self.clip = 0, None          # Zeilen-Verschiebung und sichtbarer Bereich (für Scrollen)
+        self._acc = 0.0
+        click = Gtk.GestureClick()
+        click.connect("pressed", self._click)
+        self.add_controller(click)
+        scroll = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
+        scroll.connect("scroll", self._scroll)
+        scroll.connect("scroll-end", lambda *_: setattr(self, "_acc", 0.0))
+        self.add_controller(scroll)
+        self.set_cursor(Gdk.Cursor.new_from_name("default"))
+        self._font_size = None
+
+
+    def _scroll(self, ctrl, dx, dy):
+        # Touchpads schicken viele kleine Schritte – sammeln, erst ab einer Raste weitergeben
+        step = 1.0 if ctrl.get_unit() == Gdk.ScrollUnit.WHEEL else 45.0
+        self._acc += dy / step
+        n = int(self._acc)
+        if n:
+            self._acc -= n
+            self.app.on_scroll(self.view, n)
+        return True
+
+
+    def metrics(self):
+        size = self.app.store.settings.get("font_size", 10)
+        if size != self._font_size:
+            self._font_size = size
+            self.font = Pango.FontDescription.from_string(f"{tui.FONT} Bold {size}")
+            self.font_n = Pango.FontDescription.from_string(f"{tui.FONT} {size}")
+            lay = self.create_pango_layout("M")
+            lay.set_font_description(self.font)
+            ink, log = lay.get_extents()
+            self.cw = log.width / Pango.SCALE
+            self.ch = math.ceil(log.height / Pango.SCALE)
+        return self.cw, self.ch
+
+    # ----- Zeichen-Befehle (von den Ansichten benutzt) -----
+    def text(self, c, r, s, color, alpha=1.0, bold=True, maxw=None, bg=None):
+        r += self.off
+        if self.clip and not (self.clip[0] <= r < self.clip[1]):
+            return
+        if maxw is not None:
+            if maxw <= 0:
+                return
+            if len(s) > maxw:
+                s = s[:max(0, maxw - 1)] + "…"
+        if bg is not None:
+            self.ops.append(("f", c, r, len(s), 1, bg[0], bg[1]))
+        self.ops.append(("t", c, r, s, color, alpha, bold))
+
+
+    def fill(self, c, r, w, h, color, alpha=1.0):
+        r += self.off
+        if self.clip:
+            top, bot = max(r, self.clip[0]), min(r + h, self.clip[1])
+            r, h = top, bot - top
+        if w > 0 and h > 0:
+            self.ops.append(("f", c, r, w, h, color, alpha))
+
+
+    def box(self, c, r, w, h, color, alpha=1.0, title=None, title_color=None, rounded=False, right=None, heavy=False):
+        """Rahmen; title/right stehen in der oberen Linie (ohne Hintergrundfläche, passt auch im Glas-Modus)."""
+        if w < 2 or h < 2:
+            return
+        if rounded:
+            tl, tr, bl, br, hz, vt = "╭", "╮", "╰", "╯", "─", "│"
+        elif heavy:
+            tl, tr, bl, br, hz, vt = "┏", "┓", "┗", "┛", "━", "┃"
+        else:
+            tl, tr, bl, br, hz, vt = "┌", "┐", "└", "┘", "─", "│"
+        inner = w - 2
+        t = f" {title} " if title else ""
+        rt = f" {right} " if right else ""
+        if len(t) + len(rt) + 3 > inner:          # zu schmal: rechte Angabe weg, dann Titel kürzen
+            rt = ""
+        if len(t) + 2 > inner:
+            t = (t[:inner - 4] + "… ") if inner >= 8 else ""
+        mid = inner - 2 - len(t) - len(rt)
+        if mid < 0:
+            t = rt = ""
+            mid = inner - 2
+        top = tl + hz + " " * len(t) + hz * mid + " " * len(rt) + hz + tr if inner >= 2 else tl + hz * inner + tr
+        self.text(c, r, top, color, alpha)
+        if t:
+            self.text(c + 2, r, t, title_color or color, 1.0)
+        if rt:
+            self.text(c + w - 2 - len(rt), r, rt, color, max(alpha, 0.8))
+        for i in range(1, h - 1):
+            self.text(c, r + i, vt, color, alpha)
+            self.text(c + w - 1, r + i, vt, color, alpha)
+        self.text(c, r + h - 1, bl + hz * inner + br, color, alpha)
+
+
+    def region(self, c, r, w, h, payload):
+        r += self.off
+        if self.clip:
+            top, bot = max(r, self.clip[0]), min(r + h, self.clip[1])
+            r, h = top, bot - top
+        if h > 0 and w > 0:
+            self.regions.append((c, r, w, h, payload))
+    def _draw(self, _area, cr, width, height):
+        self.app.pal = Palette()
+        cw, ch = self.metrics()
+        cols, rows = int(width // cw), int(height // ch)
+        self.ops, self.regions = [], []
+        self.grid = (cols, rows)
+        try:
+            self.app.render(self.view, self, cols, rows)
+        except Exception as e:  # noqa: BLE001 – Fehler sichtbar machen statt leerem Fenster
+            import traceback
+            traceback.print_exc()
+            self.ops = [("t", 1, 1, f"Fehler beim Zeichnen: {e}", (1, 0.4, 0.4), 1, True)]
+        layout = self.create_pango_layout("")
+        for op in self.ops:
+            if op[0] == "f":
+                _, c, r, w, h, color, a = op
+                cr.set_source_rgba(*color, a)
+                cr.rectangle(c * cw, r * ch, w * cw, h * ch)
+                cr.fill()
+        for op in self.ops:
+            if op[0] == "t":
+                _, c, r, s, color, a, bold = op
+                layout.set_font_description(self.font if bold else self.font_n)
+                layout.set_text(s, -1)
+                cr.set_source_rgba(*color, a)
+                cr.move_to(c * cw, r * ch)
+                PangoCairo.show_layout(cr, layout)
+
+    def _click(self, gesture, n, x, y):
+        self.grab_focus()
+        cw, ch = self.metrics()
+        c, r = x / cw, y / ch
+        hit = None
+        for rc, rr, rw, rh, payload in reversed(self.regions):   # zuletzt gezeichnet = oben
+            if rc <= c < rc + rw and rr <= r < rr + rh:
+                hit = payload
+                break
+        if hit:
+            self.app.on_hit(self.view, hit, n, gesture.get_current_button())
+
+
+class WrapLayout(Gtk.LayoutManager):
+    """Kinder nebeneinander, bei Platzmangel in die nächste Zeile (für schmale Fenster)."""
+
+    def __init__(self, spacing=8, row_spacing=4):
+        super().__init__()
+        self.spacing, self.row_spacing = spacing, row_spacing
+
+    def do_get_request_mode(self, widget):
+        return Gtk.SizeRequestMode.HEIGHT_FOR_WIDTH
+
+    def kids(self, widget):
+        c = widget.get_first_child()
+        while c:
+            if c.should_layout():
+                yield c
+            c = c.get_next_sibling()
+
+    def rows(self, widget, width):
+        rows, cur, x = [], [], 0
+        for c in self.kids(widget):
+            w = c.measure(Gtk.Orientation.HORIZONTAL, -1)[1]
+            if cur and x + self.spacing + w > width:
+                rows.append(cur)
+                cur, x = [], 0
+            x += (self.spacing if cur else 0) + w
+            cur.append((c, min(w, width)))
+        if cur:
+            rows.append(cur)
+        return rows
+
+    def do_measure(self, widget, orientation, for_size):
+        kids = list(self.kids(widget))
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            mins = [c.measure(orientation, -1)[0] for c in kids]
+            nats = [c.measure(orientation, -1)[1] for c in kids]
+            return max(mins or [0]), sum(nats) + self.spacing * max(0, len(kids) - 1), -1, -1
+        width = for_size if for_size > 0 else 10 ** 6
+        h = 0
+        for i, row in enumerate(self.rows(widget, width)):
+            h += max(c.measure(Gtk.Orientation.VERTICAL, w)[1] for c, w in row) + (self.row_spacing if i else 0)
+        return h, h, -1, -1
+
+    def do_allocate(self, widget, width, height, baseline):
+        y = 0
+        for row in self.rows(widget, width):
+            rh = max(c.measure(Gtk.Orientation.VERTICAL, w)[1] for c, w in row)
+            x = 0
+            for c, w in row:
+                r = Gdk.Rectangle()
+                r.x, r.y, r.width, r.height = int(x), int(y), int(w), int(rh)
+                c.size_allocate(r, -1)
+                x += w + self.spacing
+            y += rh + self.row_spacing
+
+
+def wrapbox(*children, spacing=8):
+    b = Gtk.Box(hexpand=True)
+    b.set_layout_manager(WrapLayout(spacing=spacing))
+    for c in children:
+        if c is not None:
+            b.append(c)
+    return b
+
+
+# =====================================================================
+# Editor
+# =====================================================================
+class Editor(Gtk.Box):
+    def __init__(self, app):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        self.app = app
+        self.add_css_class("editor-card")
+        self.panel = tui.Panel("termin")
+        self.panel.set_active(True)
+        # in kleinen Fenstern scrollt der Editor statt abgeschnitten zu werden
+        self.scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                           child=self.panel)
+        self.append(self.scroller)
+        b = self.panel.body
+        self.ev, self.orig, self.master = None, None, None
+        self.cat_manual = False
+
+        def row(name, *ws, wrap=False):
+            r = hbox(label(name, "flabel"), wrapbox(*ws) if wrap else None, *([] if wrap else ws), spacing=8)
+            b.append(r)
+            return r
+        self.title = tui.Entry("Titel, z. B. V Analysis", activate=self.save)
+        self.title.connect("changed", self.on_title)
+        row("titel", self.title)
+        self.cat = tui.Select(self.on_cat)
+        self.tone = tui.Select(self.on_tone, max_chars=14)
+        self.cal = tui.Select(self.on_cal, max_chars=22)
+        row("typ", self.cat, hbox(label("farbe", "dim"), self.tone, spacing=6), self.cal, wrap=True)
+        self.date = tui.Entry("Datum", width=14, activate=self.save)
+        self.date.connect("changed", lambda *_: self.update_hint())
+        self.date_hint = label("", "dim", ellipsize=True, hexpand=True)
+        row("datum", self.date, self.date_hint)
+        self.ds_btns = []
+        dsbox = hbox(spacing=4)
+        for n, a, e in DS:
+            btn = Gtk.Button(label=str(n), tooltip_text=f"{n}. DS {a[0]:02d}:{a[1]:02d}–{e[0]:02d}:{e[1]:02d} "
+                                                         f"(Alt+{n}; Umschalt+Klick: bis hier)")
+            btn.add_css_class("ds")
+            ctl = Gtk.GestureClick()
+            ctl.connect("pressed", lambda g, nn, x, y, k=n: self.pick_ds(
+                k, extend=bool(g.get_current_event_state() & Gdk.ModifierType.SHIFT_MASK)))
+            btn.add_controller(ctl)
+            dsbox.append(btn)
+            self.ds_btns.append(btn)
+        row("ds", dsbox, wrap=True)
+        self.t_from = tui.Entry("von", width=6, activate=self.save)
+        self.t_to = tui.Entry("bis", width=6, activate=self.save)
+        for e in (self.t_from, self.t_to):
+            e.connect("changed", lambda *_: self.sync_ds())
+        self.allday = tui.Check("ganztägig", callback=lambda on: self.on_allday(on))
+        row("zeit", hbox(self.t_from, label("–", "dim"), self.t_to, spacing=6), self.allday, wrap=True)
+        self.loc = tui.Entry("Hörsaal, z. B. POT/81/H", activate=self.save)
+        self.loc_pick = tui.Select(lambda v: self.loc.set_text(v), tooltip="zuletzt benutzte Orte", max_chars=1)
+        row("ort", self.loc, self.loc_pick)
+        self.link = tui.Entry("OPAL / BigBlueButton / Zoom …", activate=self.save)
+        row("link", self.link, tui.Button("öffnen", self.open_link))
+        self.notes = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, accepts_tab=False, hexpand=True)
+        nb = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, min_content_height=52, max_content_height=110,
+                                propagate_natural_height=True, child=self.notes, hexpand=True)
+        nb.add_css_class("notes-box")
+        row("notiz", nb)
+        self.rep = tui.Select(self.on_rep, max_chars=32)
+        self.until = tui.Entry("bis (Datum)", width=12)
+        self.until.connect("changed", lambda *_: self.update_hint())
+        row("wdh.", self.rep, hbox(label("bis", "dim"), self.until, spacing=6), wrap=True)
+        self.custom = tui.Entry("RRULE, z. B. FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10")
+        self.custom.connect("changed", lambda *_: self.update_hint())
+        self.custom_row = row("regel", self.custom)
+        self.rep_hint = label("", "dim", wrap=True)
+        b.append(self.rep_hint)
+        self.scope_inst = tui.Check("nur dieser termin", True, lambda on: self.set_scope("instance"))
+        self.scope_series = tui.Check("ganze serie", False, lambda on: self.set_scope("series"))
+        self.scope_row = row("serie", self.scope_inst, self.scope_series, wrap=True)
+        self.msg = label("", "warn", wrap=True)
+        b.append(self.msg)
+        self.del_btn = tui.Button("löschen", self.delete, danger=True)
+        self.keys_hint = label("alt+1–7 ds · strg+⏎ speichern · esc abbrechen", "dim")
+        btns = wrapbox(tui.Button("speichern ⏎", self.save), self.del_btn, tui.Button("abbrechen", self.close),
+                       self.keys_hint)
+        btns.set_margin_top(6)
+        b.append(btns)
+        self.scope = "single"
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        self.add_controller(keys)
+
+    # ----- Öffnen -----
+    def open(self, ev=None, day=None, ds=None, orig=None):
+        app = self.app
+        self.orig = orig
+        self.master = None
+        new = ev is None
+        if new:
+            day = day or dt.date.today()
+            a, e = tudd.ds_times(ds or 1)
+            ev = {"cal": app.store.default_cal(), "title": "", "allday": False,
+                  "start": st.iso(dt.datetime.combine(day, a)), "end": st.iso(dt.datetime.combine(day, e)),
+                  "location": "", "link": "", "notes": "", "cat": "", "tone": "", "rrule": None}
+        self.ev = copy.deepcopy(ev)
+        self.cat_manual = bool(ev.get("cat")) and not new
+        self.panel.set_title("neuer termin" if new else "termin bearbeiten")
+        self.del_btn.set_visible(not new)
+        self.fill(self.ev)
+        is_series = bool(orig and (orig.get("series") or orig.get("rrule")))
+        self.scope_row.set_visible(is_series)
+        self.scope = "instance" if is_series else "single"
+        self.scope_inst.set_active(True)
+        self.scope_series.set_active(False)
+        self.msg.set_label("")
+        self.set_visible(True)
+        GLib.idle_add(lambda: (self.title.grab_focus(), self.title.set_position(-1)) and False)
+
+    def fill(self, ev):
+        app = self.app
+        self.title.set_text(ev.get("title", ""))
+        self.cat.set_options([(k, f"{s} {n}") for k, n, s, _ in CATS], ev.get("cat") or tudd.guess_cat(ev.get("title")))
+        self.tone.set_options([("", "auto (typ)")] + TONES, ev.get("tone") or "")
+        cals = app.store.writable()
+        if ev.get("gid") or ev.get("uid", "").startswith("local-"):
+            cals = [c for c in app.store.all_calendars() if c["id"] == ev["cal"]] or cals   # Kalender nicht wechselbar
+        self.cal.set_options([(c["id"], ("◆ " if c["id"] == "local" else "◇ ") + c["name"]) for c in cals], ev["cal"])
+        allday = bool(ev.get("allday"))
+        s, e = st.parse_when(ev["start"], allday), st.parse_when(ev["end"], allday)
+        if allday:
+            e -= dt.timedelta(days=1)
+        self.date.set_text(tudd.fmt_date(s.date()))
+        self.t_from.set_text("" if allday else f"{s:%H:%M}")
+        self.t_to.set_text("" if allday else f"{e:%H:%M}")
+        self.allday.set_active(allday)
+        self.on_allday(allday)
+        self.loc.set_text(ev.get("location", ""))
+        locs = app.store.recent_locations()
+        self.loc_pick.set_options([(l, l) for l in locs], None)
+        self.loc_pick.lbl.set_label("")
+        self.loc_pick.set_visible(bool(locs))
+        self.link.set_text(ev.get("link", ""))
+        self.notes.get_buffer().set_text(ev.get("notes", ""))
+        rule = ev.get("rrule")
+        pid = rrule.preset_of(rule, s) if rule else "none"
+        self.rep.set_options(rrule.PRESETS, pid)
+        u = rrule.until_of(rule) if rule else None
+        self.until.set_text(f"{u:%d.%m.%Y}" if u else "")
+        self.custom.set_text(rule or "")
+        self.custom_row.set_visible(pid == "custom")
+        # Wiederholung nur bei neuen Terminen, lokalen Serien oder 'ganze Serie' änderbar
+        series_edit_ok = not ev.get("series")
+        self.rep.set_sensitive(series_edit_ok)
+        self.until.set_sensitive(series_edit_ok)
+        self.sync_ds()
+        self.update_hint()
+
+    # ----- Felder -----
+    def on_title(self, *_):
+        if not self.cat_manual:
+            self.cat.set_options(self.cat.options, tudd.guess_cat(self.title.get_text()))
+
+    def on_cat(self, v):
+        self.cat_manual = True
+        self.cat.set_options(self.cat.options, v)
+
+    def on_tone(self, v):
+        self.tone.set_options(self.tone.options, v)
+
+    def on_cal(self, v):
+        self.cal.set_options(self.cal.options, v)
+
+    def on_allday(self, on):
+        for w in (self.t_from, self.t_to, *self.ds_btns):
+            w.set_sensitive(not on)
+
+    def on_rep(self, v):
+        self.rep.set_options(self.rep.options, v)
+        self.custom_row.set_visible(v == "custom")
+        if v == "custom" and not self.custom.get_text():
+            self.custom.set_text("FREQ=WEEKLY;BYDAY=" + rrule.DAYS[self.day().weekday()])
+        self.update_hint()
+
+    def day(self):
+        try:
+            return tudd.parse_date(self.date.get_text())
+        except ValueError:
+            return None
+
+    def pick_ds(self, n, extend=False):
+        a, e = tudd.ds_times(n)
+        if extend and self.t_from.get_text():
+            try:
+                first = tudd.parse_time(self.t_from.get_text())
+                if a > first:
+                    a = first
+            except ValueError:
+                pass
+        self.allday.set_active(False)
+        self.on_allday(False)
+        self.t_from.set_text(f"{a:%H:%M}")
+        self.t_to.set_text(f"{e:%H:%M}")
+
+    def sync_ds(self):
+        try:
+            a, e = tudd.parse_time(self.t_from.get_text()), tudd.parse_time(self.t_to.get_text())
+        except ValueError:
+            a = e = None
+        for (n, s, f), b in zip(DS, self.ds_btns):
+            on = a is not None and a <= dt.time(*s) and e >= dt.time(*f)
+            (b.add_css_class if on else b.remove_css_class)("on")
+
+    def rule(self):
+        """(rrule, start_date) aus den Feldern."""
+        d = self.day()
+        pid = self.rep.current
+        if pid == "none" or d is None:
+            return None, d
+        until = None
+        if self.until.get_text().strip():
+            until = tudd.parse_date(self.until.get_text())
+        if pid == "custom":
+            r = self.custom.get_text().strip()
+            if r.upper().startswith("RRULE:"):
+                r = r[6:]
+            rrule.parse(r)
+            return r, d
+        r, start = rrule.preset_rule(pid, dt.datetime.combine(d, dt.time()), until=until)
+        return r, start.date()
+
+    def update_hint(self):
+        d = self.day()
+        if d:
+            par = tudd.parity(d)
+            self.date_hint.set_label(f"→ {WEEKDAYS_LONG[d.weekday()]}, {d.day}. {MONTHS[d.month - 1]} · KW {tudd.kw(d)} {par}")
+        else:
+            self.date_hint.set_label("→ ? (heute, morgen, mi, +3, 20.10.)")
+        if self.ev and self.ev.get("series") and self.scope != "series":
+            self.rep_hint.set_label("↻ Teil einer Serie – „ganze serie“ wählen, um Wiederholung oder alle Termine zu ändern")
+            return
+        try:
+            r, start = self.rule()
+            txt = rrule.describe(r, dt.datetime.combine(start, dt.time())) if r else "einmalig"
+            if r and start and d and start != d:
+                txt += f" · beginnt {tudd.fmt_date(start)} (passende KW)"
+            if r and "INTERVAL=2" in r and "WEEKLY" in r:
+                txt += " · Achtung: 2026 hat KW 53 – über den Jahreswechsel kippt die Parität, " \
+                       "dafür „jede gerade/ungerade KW (exakt)“ wählen"
+            self.rep_hint.set_label("↻ " + txt)
+        except ValueError as e:
+            self.rep_hint.set_label(f"✗ {e}")
+
+    def set_scope(self, scope):
+        self.scope = scope
+        self.scope_inst.set_active(scope == "instance")
+        self.scope_series.set_active(scope == "series")
+        if scope == "series":
+            self.load_master()
+        else:
+            self.fill(self.ev)
+
+    def load_master(self):
+        o = self.orig
+        if o.get("cal") == "local":
+            self.master = self.app.store.local.get(o["uid"])
+            self.fill({**self.master, "series": None})
+            return
+        self.msg.set_label("lade serie …")
+
+        def done(res):
+            if isinstance(res, Exception):
+                self.msg.set_label(f"Serie nicht geladen (offline?): {res}")
+                self.set_scope("instance")
+                return
+            self.master = res
+            self.msg.set_label("")
+            self.fill({**res, "series": None})
+        tui.background(gcal.master, o["cal"], o["series"], done=done)
+
+    def open_link(self):
+        url = self.link.get_text().strip()
+        if url:
+            if "://" not in url:
+                url = "https://" + url
+            Gio.AppInfo.launch_default_for_uri(url, None)
+
+    def on_key(self, ctrl, kv, code, state):
+        if kv == Gdk.KEY_Escape:
+            self.close()
+            return True
+        if state & Gdk.ModifierType.CONTROL_MASK and kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_s):
+            self.save()
+            return True
+        if state & Gdk.ModifierType.ALT_MASK and Gdk.KEY_1 <= kv <= Gdk.KEY_7:
+            self.pick_ds(kv - Gdk.KEY_0, extend=bool(state & Gdk.ModifierType.SHIFT_MASK))
+            return True
+        return False
+
+    # ----- Speichern -----
+    def collect(self):
+        d = self.day()
+        if d is None:
+            raise ValueError("Datum nicht erkannt")
+        ev = dict(self.master if self.scope == "series" and self.master else self.ev)
+        ev["title"] = self.title.get_text().strip() or "(ohne Titel)"
+        ev["cat"] = self.cat.current
+        ev["tone"] = self.tone.current or ""
+        ev["cal"] = self.cal.current
+        ev["location"] = self.loc.get_text().strip()
+        ev["link"] = self.link.get_text().strip()
+        buf = self.notes.get_buffer()
+        ev["notes"] = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False).strip()
+        if self.scope != "instance" and not ev.get("series"):
+            r, d2 = self.rule()
+            if r:
+                d = d2
+            ev["rrule"] = r if r else ("" if ev.get("gid") and self.scope == "series" else None)
+        if self.allday.active:
+            ev["allday"] = True
+            ev["start"] = d.isoformat()
+            ev["end"] = (d + dt.timedelta(days=1)).isoformat()
+        else:
+            a = tudd.parse_time(self.t_from.get_text())
+            e = tudd.parse_time(self.t_to.get_text())
+            s, f = dt.datetime.combine(d, a), dt.datetime.combine(d, e)
+            if f <= s:
+                f += dt.timedelta(days=1) if e < a else dt.timedelta(minutes=90)
+            ev["allday"] = False
+            ev["start"], ev["end"] = st.iso(s), st.iso(f)
+        return ev
+
+    def save(self):
+        try:
+            ev = self.collect()
+        except ValueError as e:
+            self.msg.set_label(f"✗ {e}")
+            return
+        scope = self.scope
+        if scope == "series" and self.master:
+            ev["gid"] = self.master.get("gid")
+            ev["uid"] = self.master.get("uid")
+            ev["series"] = None
+        self.app.store.save_event(ev, scope=scope, original=self.orig)
+        self.close()
+        self.app.after_edit(f"gespeichert: {ev['title']}")
+        self.app.cursor = st.parse_when(ev["start"], ev.get("allday")).date()
+        self.app.redraw()
+
+    def delete(self):
+        if self.del_btn.get_label() != "wirklich?":
+            self.del_btn.set_label("wirklich?")
+            GLib.timeout_add(2500, lambda: self.del_btn.set_label("löschen") and False)
+            return
+        ev = self.master if self.scope == "series" and self.master else self.ev
+        self.app.store.delete_event(ev, scope=self.scope, original=self.orig)
+        self.close()
+        self.app.after_edit(f"gelöscht: {ev.get('title')}")
+
+    def close(self):
+        self.set_visible(False)
+        self.del_btn.set_label("löschen")
+        self.app.focus_view()
+
+
+# =====================================================================
+# App
+# =====================================================================
+class Kalender(Gtk.Application):
+    def __init__(self):
+        super().__init__(application_id=APP_ID)
+        self.win = None
+
+    def do_activate(self):
+        if self.win and self.win.get_visible() and self.win.is_active():
+            self.win.close()               # Super+K zum Ein-/Ausblenden
+            return
+        if not self.win:
+            self.build()
+        self.win.present()
+        self.focus_view()
+
+    # ----- Aufbau -----
+    def build(self):
+        self.store = st.Store()
+        self.store.listeners.append(self.redraw)
+        self.pal = None
+        self.cursor = dt.date.today()
+        self.slot = self.current_slot()
+        self.focus_uid = None
+        self.day_scroll = 0
+        self.week_scroll = 0
+        self.week_overflow = False
+        self.syncing = False
+        self.sync_note = ""
+        self.last_errors = []
+        self.login = None
+        self.del_armed = None
+
+        if CSS not in tui.CSS:          # im selben Stylesheet wie tui, damit @primary usw. auflösen
+            tui.CSS += CSS
+            tui.Theme.get().load()
+        tabs = [("day", "tag", "󰃭"), ("week", "woche", "󰸗"), ("month", "monat", "󰃰"), ("acct", "konto", "󰀄")]
+        win = tui.TuiWindow(self, "kalender", tabs, size=(1180, 780),
+                            hints=(("hjkl", "nav"), ("n", "neu"), ("a", "schnell"), ("t", "heute"), ("?", "hilfe")))
+        win.APP_ID = APP_ID
+        self.win = win
+        self.kw_badge = label("", "kw-badge")
+        self.sync_badge = label("", "sync-badge")
+        self.prev_btn = tui.Button("‹", lambda: self.step_period(-1), tooltip="voriger Zeitraum (H)")
+        self.today_btn = tui.Button("heute", self.go_today, tooltip="zu heute springen (t)")
+        self.next_btn = tui.Button("›", lambda: self.step_period(1), tooltip="nächster Zeitraum (L)")
+        self.kw_badge.set_tooltip_text("Kalenderwoche des markierten Tages")
+        self.relogin_btn = tui.Button("⚠ neu anmelden", self.start_login, danger=True,
+                                      tooltip="Google-Anmeldung abgelaufen (im Testmodus alle 7 Tage) – "
+                                              "klicken, um dich im Browser neu anzumelden")
+        self.relogin_btn.set_visible(False)
+        for w in (self.relogin_btn, self.sync_badge, self.prev_btn, self.today_btn, self.next_btn, self.kw_badge):
+            win.header_extra.append(w)
+        self.header_compact = False
+        win.on_resize = self.on_resize
+        # Kopfleiste darf die Mindestbreite nicht bestimmen: in einen Container, der notfalls abschneidet,
+        # bis on_resize die passende Stufe (Symbole statt Text) gewählt hat
+        root = win.get_child()
+        root.remove(win.topbar)
+        self.top_clip = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL,
+                                           vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
+                                           child=win.topbar)
+        root.prepend(self.top_clip)
+
+        self.views = {}
+        for v in ("day", "week", "month"):
+            c = Cells(self, v)
+            self.views[v] = c
+            win.add_page(v, c, scroll=False)
+        win.add_page("acct", self.build_account())
+        # Editor als Ebene über dem Inhalt
+        win.content.remove(win.stack)
+        self.overlay = Gtk.Overlay(child=win.stack, vexpand=True)
+        self.editor = Editor(self)
+        self.editor.set_visible(False)
+        self.overlay.add_overlay(self.editor)
+        self.help = self.build_help()
+        self.help.set_visible(False)
+        self.overlay.add_overlay(self.help)
+        self.apply_see_through()
+        win.content.append(self.overlay)
+        # Schnelleingabe
+        self.quick = tui.Entry("schnell: V Mathe mi 2ds @POT/81/H #v !u bis 5.2.   (esc abbrechen)",
+                               activate=self.quick_add)
+        self.quick_rev = Gtk.Revealer(child=hbox(label("󰐕", "accent"), self.quick, spacing=8),
+                                      transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
+        self.quick_rev.get_child().add_css_class("quick")
+        win.content.append(self.quick_rev)
+        qk = Gtk.EventControllerKey()
+        qk.connect("key-pressed", lambda c, kv, *_: kv == Gdk.KEY_Escape and (self.close_quick() or True))
+        self.quick.add_controller(qk)
+
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self.on_key)
+        win.add_controller(keys)
+        win.on_tab = lambda tid: (self.store.settings.__setitem__("view", tid), self.store.save_settings(),
+                                  self.update_header(), self.focus_view(), tid == "acct" and self.refresh_account())
+        win.on_refresh = lambda: self.sync(force=True)
+        win.theme.listeners.append(self.redraw)
+        orig_key = win._key
+
+        def key_guard(c, kv, code, state):
+            # Esc zuerst an Editor/Hilfe/Schnelleingabe, erst dann Fenster schließen
+            if kv == Gdk.KEY_Escape:
+                if self.editor.get_visible():
+                    self.editor.close()
+                    return True
+                if self.help.get_visible():
+                    self.help.set_visible(False)
+                    return True
+                if self.quick_rev.get_reveal_child():
+                    self.close_quick()
+                    return True
+            if self.editor.get_visible() and not isinstance(win.get_focus(), (Gtk.Text, Gtk.TextView)) \
+                    and Gdk.KEY_1 <= kv <= Gdk.KEY_9:
+                return False
+            return orig_key(c, kv, code, state)
+        win._key = key_guard
+        # TuiWindow hat seinen Controller schon mit der alten Methode verbunden → ersetzen
+        c = win.observe_controllers()
+        for i in range(c.get_n_items()):
+            ctl = c.get_item(i)
+            if isinstance(ctl, Gtk.EventControllerKey) and ctl.get_propagation_phase() == Gtk.PropagationPhase.CAPTURE:
+                win.remove_controller(ctl)
+                break
+        k2 = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        k2.connect("key-pressed", key_guard)
+        win.add_controller(k2)
+
+        view = self.store.settings.get("view", "week")
+        win.show_tab(view if view in ("day", "week", "month", "acct") else "week")
+        self.update_header()
+        GLib.timeout_add_seconds(SYNC_EVERY, lambda: self.sync() or True)
+        GLib.timeout_add_seconds(30, lambda: self.redraw() or True)      # Jetzt-Linie
+        Gio.NetworkMonitor.get_default().connect("network-changed", lambda m, up: up and self.sync())
+        GLib.idle_add(lambda: self.sync() and False)
+
+    def apply_see_through(self):
+        on = self.store.settings.get("see_through", True)
+        for w in (self.editor, self.help):
+            (w.add_css_class if on else w.remove_css_class)("see-through")
+
+    def go_today(self):
+        self.cursor = dt.date.today()
+        self.slot = self.current_slot()
+        self.focus_uid = None
+        self.day_scroll = 0
+        self.after_move()
+        self.focus_view()
+
+    def step_period(self, d):
+        view = self.win.current_tab()
+        if view == "month":
+            self.cursor = self.add_months(self.cursor, d)
+            self.after_move()
+        else:
+            self.move_day(d * (1 if view == "day" else 7))
+        self.focus_view()
+
+    def on_resize(self, w, h):
+        """Kopfleiste und Editor an die Fenstergröße anpassen (halber Bildschirm und kleiner)."""
+        compact, tiny = w < 820, w < 520
+        top = self.win.topbar.get_child()
+        c = top.get_first_child()
+        while c:
+            if c.has_css_class("brand") or c.has_css_class("glass-toggle"):
+                c.set_visible(not compact)        # sonst bleibt das Fenster über der nächsten Stufe hängen
+            c = c.get_next_sibling()
+        self.prev_btn.set_visible(not tiny)
+        self.next_btn.set_visible(not tiny)
+        if tiny:                                  # sehr schmal: Tabs nur als Symbol
+            for name_lbl, icon_lbl in self.win.tab_names.values():
+                if icon_lbl is not None:
+                    name_lbl.set_visible(False)
+                    icon_lbl.set_visible(True)
+        elif self.win.compact is not None:
+            self.win._apply_compact()
+        self.today_btn.set_label("◉" if compact else "heute")
+        self.header_compact = compact
+        self.editor.set_size_request(max(240, min(640, w - 20)), -1)
+        self.editor.scroller.set_max_content_height(max(160, h - 110))
+        self.editor.keys_hint.set_visible(not compact)
+        self.update_header()
+
+    def focus_view(self):
+        v = self.win.current_tab() if self.win else None
+        if v in self.views:
+            self.views[v].grab_focus()
+
+    # ----- Zustand -----
+    def current_slot(self):
+        now = dt.datetime.now()
+        n = tudd.ds_of(now.time())
+        if n:
+            return n - 1
+        m = now.hour * 60 + now.minute
+        for i, (_, a, b) in enumerate(DS):
+            if m < tudd.minutes(a):
+                return i
+        return 6
+
+    def redraw(self):
+        if not self.win:
+            return
+        for c in self.views.values():
+            c.queue_draw()
+        self.update_header()
+        if self.win.current_tab() == "acct":
+            self.refresh_account()
+
+    def update_header(self):
+        d = self.cursor
+        even = tudd.kw(d) % 2 == 0
+        if self.header_compact:
+            self.kw_badge.set_label(f"KW {tudd.kw(d)} {'g' if even else 'u'}")
+        else:
+            self.kw_badge.set_label(f"KW {tudd.kw(d)} · {'gerade' if even else 'ungerade'}")
+        self.kw_badge.set_css_classes(["kw-badge", "even" if even else "odd"])
+        n = len(self.store.pending)
+        exp = gcal.logged_in() and gcal.expired()
+        self.relogin_btn.set_visible(exp)
+        self.relogin_btn.set_sensitive(self.login is None)
+        if self.login is not None:
+            self.relogin_btn.set_label("… browser" if self.header_compact else "… warte auf browser")
+        else:
+            self.relogin_btn.set_label("⚠" if self.header_compact else "⚠ neu anmelden")
+        if self.syncing:
+            s = "⟳ gleiche ab …"
+        elif exp:
+            s = f"⚠ abgelaufen · {n} offen" if n else "⚠ abgelaufen"
+        elif not gcal.logged_in():
+            s = "◆ lokal"
+        elif n:
+            s = f"⟳ {n} offen"
+        elif self.store.synced:
+            t = dt.datetime.fromisoformat(self.store.synced)
+            s = f"✓ {t:%H:%M}"
+        else:
+            s = "○ noch nicht abgeglichen"
+        self.sync_badge.set_tooltip_text(s)
+        self.sync_badge.set_visible(not exp)        # bei abgelaufener Anmeldung reicht der ⚠-Knopf
+        if self.header_compact:
+            s = s.split(" ")[0]                  # schmal: nur das Symbol, Text im Tooltip
+        self.sync_badge.set_label(s)
+
+    # ----- Abgleich -----
+    def sync(self, force=False):
+        if self.syncing or not gcal.logged_in() or not gcal.client():
+            self.update_header()
+            return False
+        if gcal.expired():                       # nicht ständig gegen die abgelaufene Anmeldung laufen
+            if force:
+                self.win.say("Google-Anmeldung abgelaufen – oben auf „⚠ neu anmelden“ klicken", error=True)
+            self.update_header()
+            return False
+        center = self.cursor
+        win = self.store.window
+        if win:
+            a = dt.datetime.fromisoformat(win[0]).date()
+            b = dt.datetime.fromisoformat(win[1]).date()
+            if not (a + dt.timedelta(days=30) <= center <= b - dt.timedelta(days=60)):
+                win = None
+        window = tuple(win) if win else gcal.window_around(center)
+        self.syncing = True
+        self.update_header()
+        pend = copy.deepcopy(self.store.pending)
+
+        def done(res):
+            self.syncing = False
+            if isinstance(res, gcal.ExpiredError):
+                self.win.say("Google-Anmeldung abgelaufen (Testmodus: alle 7 Tage) – oben auf „⚠ neu anmelden“ "
+                             "klicken. Änderungen bleiben gespeichert.", error=True)
+                if self.win.current_tab() == "acct":
+                    self.refresh_account()
+            elif isinstance(res, gcal.AuthError):
+                self.win.say(f"Google-Anmeldung: {res}", error=True)
+            elif isinstance(res, Exception):
+                self.win.say(f"Abgleich fehlgeschlagen: {res}", error=True)
+            else:
+                self.store.apply_sync(res)
+                self.last_errors = res.get("errors", [])
+                if res.get("offline"):
+                    self.win.say("offline – Änderungen bleiben gespeichert und gehen später raus")
+                elif self.last_errors:
+                    self.win.say(self.last_errors[0], error=True)
+                elif force:
+                    self.win.say("abgeglichen")
+            self.update_header()
+            self.redraw()
+        tui.background(gcal.sync, pend, window, done=done)
+        return False
+
+    def after_edit(self, msg):
+        self.win.say(msg)
+        self.redraw()
+        if gcal.logged_in():
+            GLib.timeout_add(800, lambda: self.sync() and False)
+
+    # =================================================================
+    # Ansichten
+    # =================================================================
+    def render(self, view, g, cols, rows):
+        p = self.pal
+        g.fill(0, 0, cols, rows, p.bg, 0.0)
+        if view == "week":
+            self.render_week(g, cols, rows)
+        elif view == "day":
+            self.render_day(g, cols, rows)
+        else:
+            self.render_month(g, cols, rows)
+
+    def occ(self, a, b):
+        return self.store.occurrences(dt.datetime.combine(a, dt.time()), dt.datetime.combine(b, dt.time()))
+
+    @staticmethod
+    def clock(d):
+        return f"{d:%H:%M}"
+
+    # ----- Zeitachse: Zeilen für DS und Pausen -----
+    def time_rows(self, k, early, late, extra=0, pauses=True):
+        """Segmente [(art, nr, beginn_min, ende_min, erste_zeile, zeilen)]. extra: Zusatzzeilen für die ersten DS.
+        pauses=False: Pausen bekommen keine eigene Zeile (sehr niedrige Fenster)."""
+        segs, r = [], 0
+        if early:
+            segs.append(("early", 0, 0, tudd.minutes(DS[0][1]), r, 1))
+            r += 1
+        for i, (n, a, b) in enumerate(DS):
+            kk = k + (1 if i < extra else 0)
+            segs.append(("ds", n, tudd.minutes(a), tudd.minutes(b), r, kk))
+            r += kk
+            if i < len(DS) - 1:
+                if pauses:
+                    segs.append(("pause", n, tudd.minutes(b), tudd.minutes(DS[i + 1][1]), r, 1))
+                    r += 1
+                else:
+                    segs.append(("pause", n, tudd.minutes(b), tudd.minutes(DS[i + 1][1]), r, 0))
+        if late:
+            segs.append(("late", 0, tudd.minutes(DS[-1][2]), 24 * 60, r, 1))
+            r += 1
+        return segs, r
+
+
+    @staticmethod
+    def row_at(segs, minute):
+        for kind, n, a, b, r0, h in segs:
+            if a <= minute < b or (kind == "late" and minute >= a):
+                return r0 + (minute - a) / max(1, b - a) * h
+        if segs and minute < segs[0][2]:
+            return segs[0][4]
+        return segs[-1][4] + segs[-1][5] if segs else 0
+
+    def lanes(self, items):
+        """Überlappende Termine nebeneinander: [(occ, lane, n_lanes)]."""
+        out, active = [], []
+        groups, cur, cur_end = [], [], None
+        for o in sorted(items, key=lambda o: (o["s"], -(o["e"] - o["s"]).total_seconds())):
+            if cur and o["s"] >= cur_end:
+                groups.append(cur)
+                cur, cur_end = [], None
+            cur.append(o)
+            cur_end = max(cur_end, o["e"]) if cur_end else o["e"]
+        if cur:
+            groups.append(cur)
+        for grp in groups:
+            ends = []
+            placed = []
+            for o in grp:
+                for i, e in enumerate(ends):
+                    if e <= o["s"]:
+                        ends[i] = o["e"]
+                        placed.append((o, i))
+                        break
+                else:
+                    ends.append(o["e"])
+                    placed.append((o, len(ends) - 1))
+            out.extend((o, lane, len(ends)) for o, lane in placed)
+        return out
+
+    def event_lines(self, o, w):
+        icons = ""
+        if o.get("pending"):
+            icons += "⟳"
+        if o.get("series") or o.get("rrule"):
+            icons += "↻"
+        short = CAT_SHORT.get(o.get("cat"), "○")
+        title = o["title"] if o["title"].split(" ", 1)[0] in (short, short + ":", "VL", "Ü:", "V:") else f"{short} {o['title']}"
+        if icons:
+            title += " " + icons
+        lines = [title]
+        if o.get("location"):
+            lines.append("⌂ " + o["location"])
+        lines.append(f"{self.clock(o['s'])}–{self.clock(o['e'])}")
+        if o.get("link"):
+            lines.append("󰌹 " + re.sub(r"^https?://(www\.)?", "", o["link"]))
+        return lines
+
+    def draw_event(self, g, o, c, r, w, h, selected=False):
+        p = self.pal
+        col = p.cat(o.get("cat"), o.get("tone"))
+        g.region(c, r, w, h, ("event", o))
+        g.fill(c, r, w, h, col, 0.34 if selected else 0.16)
+        lines = self.event_lines(o, w)
+        if h >= 3 and w >= 6:
+            g.box(c, r, w, h, col, 1.0 if selected else 0.85, heavy=o.get("cat") == "pruefung")
+            inner = w - 2
+            for i, line in enumerate(lines[:h - 2]):
+                g.text(c + 1, r + 1 + i, line, p.fg if i == 0 else col, 1.0 if i == 0 else 0.95, maxw=inner)
+            if selected:
+                g.text(c, r, "┏", col)
+        else:
+            for i in range(h):
+                g.text(c, r + i, "▌", col)
+            for i, line in enumerate(lines[:h]):
+                g.text(c + 1, r + i, line, p.fg if i == 0 else col, maxw=w - 1)
+
+    # ----- Woche -----
+    def week_days(self, cols=None, gut=8):
+        """Sichtbare Tage: ganze Woche, bei wenig Breite Mo–Fr, 3 Tage um den Cursor oder nur der Cursor-Tag."""
+        ws = tudd.week_start(self.cursor)
+        full = [ws + dt.timedelta(days=i) for i in range(7 if self.store.settings.get("weekend", True) else 5)]
+        if cols is None:
+            return full
+        avail = cols - gut - 1
+        if avail // len(full) >= 9:
+            return full
+        if avail // 5 >= 9 and self.cursor.weekday() < 5:
+            return full[:5]
+        if avail // 3 >= 8:
+            i = self.cursor.weekday()
+            s = min(max(i - 1, 0), 4)
+            return [ws + dt.timedelta(days=s + j) for j in range(3)]
+        return [self.cursor]
+
+
+    def render_week(self, g, cols, rows):
+        p = self.pal
+        gut = 8 if cols >= 70 else 6
+        days = self.week_days(cols, gut)
+        nd = len(days)
+        a, b = days[0], days[-1] + dt.timedelta(days=1)
+        occ = self.occ(a, b)
+        allday = [o for o in occ if o.get("allday") or (o["e"] - o["s"]) >= dt.timedelta(hours=20)]
+        timed = [o for o in occ if o not in allday]
+        early = any(o["s"].time() < dt.time(*DS[0][1]) for o in timed)
+        late = any(o["e"].time() > dt.time(*DS[-1][2]) or o["e"].date() > o["s"].date() for o in timed)
+        top = 2 + (1 if allday else 0)               # Rahmen-Titel + Tageszeile (+ ganztägig)
+        r0 = top + 1                                  # nach der Trennlinie
+        avail = rows - r0 - 1                         # Zeilen für das Raster (unten der Rahmen)
+        free = avail - (1 if early else 0) - (1 if late else 0)
+        if free >= 7 * 2 + 6:                         # genug Platz: DS mit Pausenzeilen
+            k, pauses = (free - 6) // 7, True
+            extra = (free - 6) - 7 * k
+        elif free >= 7:                               # eng: Pausen ohne eigene Zeile
+            k, pauses = free // 7, False
+            extra = free - 7 * k
+        else:                                         # sehr eng: kleinstes Raster, scrollt mit dem Cursor
+            k, pauses, extra = 1, False, 0
+        segs, grid_h = self.time_rows(k, early, late, extra, pauses)
+        dw = max(4, (cols - gut - 1) // nd)
+        width = min(cols, gut + dw * nd + 1)
+        kwn = tudd.kw(self.cursor)
+        even = kwn % 2 == 0
+        par_col = p.primary if even else p.tones["tertiary"]
+        title = f"KW {kwn} ◆ {'gerade' if even else 'ungerade'}" if width >= 30 else f"KW {kwn} {'g' if even else 'u'}"
+        if nd >= 5:
+            last = days[-1]
+            rng = f"{a.day}.{'' if a.month == last.month else f'{a.month}.'}–{last.day}. {MONTHS[last.month - 1]} {last.year}"
+            if width < 70:
+                rng = f"{a.day}.{a.month}.–{last.day}.{last.month}."
+        else:
+            rng = f"{MONTHS[a.month - 1]} {a.year}"
+        box_h = min(rows, r0 + min(grid_h, avail) + 1)
+        g.box(0, 0, width, box_h, p.primary, 0.55, title=title, title_color=par_col, rounded=True, right=rng)
+        today = dt.date.today()
+        # Tage
+        for i, d in enumerate(days):
+            c = gut + i * dw
+            if dw >= 11:
+                lab = f"{WEEKDAYS[d.weekday()]} {d.day:02d}.{d.month:02d}."
+            elif dw >= 6:
+                lab = f"{WEEKDAYS[d.weekday()]} {d.day}"
+            else:
+                lab = f"{d.day}"
+            if nd == 1 and width >= 24:
+                lab = f"{WEEKDAYS_LONG[d.weekday()]} {d.day}.{d.month}."
+            x = c + 1 + max(0, (dw - 1 - len(lab)) // 2)
+            if d == today:
+                g.fill(c + 1, 1, dw - 1, 1, p.primary, 1.0)
+                g.text(x, 1, lab, p.on_primary, maxw=dw - 1)
+            else:
+                g.text(x, 1, lab, p.fg, 0.55 if d.weekday() >= 5 else 1.0, maxw=dw - 1)
+            if d == self.cursor and d != today and nd > 1:
+                g.text(c + 1, 1, "▸", p.primary)
+            g.region(c + 1, 1, dw - 1, 1, ("day", d))
+        if nd < len(self.week_days()):               # Hinweis: es gibt weitere Tage links/rechts
+            if days[0] > tudd.week_start(self.cursor):
+                g.text(gut, 1, "‹", p.primary)
+            if days[-1] < self.week_days()[-1]:
+                g.text(width - 2, 1, "›", p.primary)
+        if allday:
+            g.text(1, 2, "ganzt." if gut >= 8 else "gzt", p.fg, 0.5)
+            for i, d in enumerate(days):
+                c = gut + i * dw + 1
+                its = [o for o in allday if o["s"].date() <= d < max(o["e"].date(), o["s"].date() + dt.timedelta(days=1))]
+                if its:
+                    o = its[0]
+                    col = p.cat(o.get("cat"), o.get("tone"))
+                    g.fill(c, 2, dw - 1, 1, col, 0.25)
+                    g.text(c, 2, "▌" + o["title"] + (f" +{len(its) - 1}" if len(its) > 1 else ""), col, maxw=dw - 1)
+                    g.region(c, 2, dw - 1, 1, ("event", o))
+        g.text(0, top, "├" + "─" * (width - 2) + "┤", p.primary, 0.35)
+        # Scrollen, wenn das Raster nicht ganz passt: Cursor-DS bleibt sichtbar
+        cur = next((s for s in segs if s[0] == "ds" and s[1] - 1 == self.slot), None)
+        self.week_overflow = grid_h > avail
+        if self.week_overflow and cur:
+            sr, sh = cur[4], cur[5]
+            if sr < self.week_scroll:
+                self.week_scroll = sr
+            elif sr + sh > self.week_scroll + avail:
+                self.week_scroll = sr + sh - avail
+            self.week_scroll = max(0, min(self.week_scroll, grid_h - avail))
+        else:
+            self.week_scroll = 0
+        g.off, g.clip = -self.week_scroll, (r0, r0 + avail)
+        now = dt.datetime.now()
+        for kind, n, sa, sb, sr, sh in segs:
+            rr = r0 + sr
+            if kind == "ds":
+                if sh >= 2:
+                    g.text(1, rr, f"{n}.DS", p.primary)
+                    g.text(1, rr + 1, f"{sa // 60:02d}:{sa % 60:02d}", p.fg, 0.6)
+                    if sh >= 3 and gut >= 6:
+                        g.text(1, rr + sh - 1, f"{sb // 60:02d}:{sb % 60:02d}", p.fg, 0.35)
+                elif gut >= 8:
+                    g.text(1, rr, f"{n}·{sa // 60}:{sa % 60:02d}", p.primary)
+                else:
+                    g.text(1, rr, f"{n}.DS", p.primary)
+                if not pauses:                         # ohne Pausenzeilen: feine Linie oben im DS
+                    for i in range(nd):
+                        if n > 1:
+                            g.text(gut + i * dw + 1, rr, "╌" * (dw - 1), p.fg, 0.08)
+                for i, d in enumerate(days):
+                    g.region(gut + i * dw + 1, rr, dw - 1, sh, ("slot", d, n - 1))
+            elif kind == "pause" and sh:
+                g.text(1, rr, " ┄┄┄ "[:gut - 1], p.fg, 0.25)
+                for i in range(nd):
+                    g.text(gut + i * dw + 1, rr, "┄" * (dw - 1), p.fg, 0.12)
+            elif kind in ("early", "late"):
+                g.text(1, rr, "früh" if kind == "early" else "spät", p.fg, 0.5)
+                for i in range(nd):
+                    g.text(gut + i * dw + 1, rr, "·" * (dw - 1), p.fg, 0.1)
+        for i in range(1, nd):
+            c = gut + i * dw
+            for rr in range(r0, r0 + grid_h):
+                g.text(c, rr, "│", p.fg, 0.1)
+        if self.cursor in days and cur:
+            i = days.index(self.cursor)
+            rr, sh = r0 + cur[4], cur[5]
+            g.fill(gut + i * dw + 1, rr, dw - 1, sh, p.primary, 0.09)
+            g.text(gut + i * dw, rr, "▶", p.primary)
+        day_a, day_b = tudd.minutes(DS[0][1]), tudd.minutes(DS[-1][2])
+        for i, d in enumerate(days):
+            items = [o for o in timed if o["s"].date() == d]
+            for o, lane, nl in self.lanes(items):
+                sm = o["s"].hour * 60 + o["s"].minute
+                em = o["e"].hour * 60 + o["e"].minute if o["e"].date() == d else 24 * 60
+                if em <= day_a:
+                    ra = self.row_at(segs, 0)
+                    rb = ra + 1
+                elif sm >= day_b:
+                    ra = self.row_at(segs, 24 * 60 - 1)
+                    rb = ra + 1
+                else:
+                    ra = self.row_at(segs, max(sm, day_a))
+                    rb = self.row_at(segs, min(em, day_b))
+                top_r = r0 + int(math.floor(ra + 0.001))
+                h = max(1, int(math.ceil(rb - 0.001)) - int(math.floor(ra + 0.001)))
+                lw = max(1, (dw - 1) // nl)
+                c = gut + i * dw + 1 + lane * lw
+                w = lw if lane < nl - 1 else (dw - 1) - lane * lw
+                span = tudd.ds_span(o["s"].time(), o["e"].time())
+                sel = o["uid"] == self.focus_uid or (self.focus_uid is None and d == self.cursor and span and
+                                                    span[0] <= self.slot + 1 <= span[1])
+                self.draw_event(g, o, c, top_r, w, h, sel)
+        if today in days:
+            i = days.index(today)
+            rr = r0 + int(self.row_at(segs, now.hour * 60 + now.minute))
+            if r0 <= rr < r0 + grid_h:
+                g.text(0, rr, "▶", p.tones["alert"])
+                g.text(gut + i * dw + 1, rr, "━" * (dw - 1), p.tones["alert"], 0.75)
+        g.off, g.clip = 0, None
+        if self.week_overflow:                       # Scroll-Anzeige am rechten Rand
+            pos = r0 + int(self.week_scroll / max(1, grid_h - avail) * (avail - 1))
+            g.text(width - 1, pos, "┃", p.primary)
+
+    def render_day(self, g, cols, rows):
+        p = self.pal
+        d = self.cursor
+        occ = self.occ(d, d + dt.timedelta(days=1))
+        width = cols
+        even = tudd.kw(d) % 2 == 0
+        title = f"{WEEKDAYS_LONG[d.weekday()]}, {d.day}. {MONTHS[d.month - 1]} {d.year}"
+        right = f"KW {tudd.kw(d)} ◆ {'gerade' if even else 'ungerade'}"
+        lines = []        # [(art, payload)]  – art: text/ds/pause/event
+        allday = [o for o in occ if o.get("allday") or (o["e"] - o["s"]) >= dt.timedelta(hours=20)]
+        timed = [o for o in occ if o not in allday]
+        for o in allday:
+            lines.append(("allday", o))
+        early = [o for o in timed if o["e"].time() <= dt.time(*DS[0][1]) and o["s"].date() == d]
+        if early:
+            lines.append(("head", ("vor 07:30", None, None)))
+            lines.extend(("event", o) for o in early)
+        shown = {o["uid"] + str(o["s"]) for o in early}
+        for i, (n, a, b) in enumerate(DS):
+            sa, sb = dt.time(*a), dt.time(*b)
+            lines.append(("ds", (n, sa, sb)))
+            hits = [o for o in timed if o["s"].time() < sb and (o["e"].time() > sa or o["e"].date() > d)
+                    and o["uid"] + str(o["s"]) not in shown and o["s"].date() == d]
+            for o in hits:
+                shown.add(o["uid"] + str(o["s"]))
+                lines.append(("event", o))
+            if not hits:
+                lines.append(("free", n - 1))
+            if i < len(DS) - 1:
+                pa, pb = sb, dt.time(*DS[i + 1][1])
+                ph = [o for o in timed if o["uid"] + str(o["s"]) not in shown and o["s"].time() < pb
+                      and o["e"].time() > pa]
+                lines.append(("pause", (pa, pb)))
+                for o in ph:
+                    shown.add(o["uid"] + str(o["s"]))
+                    lines.append(("event", o))
+        late = [o for o in timed if o["uid"] + str(o["s"]) not in shown]
+        if late:
+            lines.append(("head", ("nach 20:00", None, None)))
+            lines.extend(("event", o) for o in late)
+        # Höhe je Zeile
+        def height(kind, x):
+            if kind == "event":
+                n = 2 + 1 + (1 if x.get("link") else 0) + min(3, len((x.get("notes") or "").splitlines()))
+                return max(3, n)
+            return 1
+        total = sum(height(k, x) for k, x in lines)
+        avail = rows - 2
+        # Cursor-DS sichtbar halten
+        pos, cursor_row = 0, 0
+        for k, x in lines:
+            if k == "ds" and x[0] - 1 == self.slot:
+                cursor_row = pos
+            pos += height(k, x)
+        if cursor_row < self.day_scroll:
+            self.day_scroll = cursor_row
+        elif cursor_row + 6 > self.day_scroll + avail:
+            self.day_scroll = max(0, cursor_row + 6 - avail)
+        self.day_scroll = max(0, min(self.day_scroll, max(0, total - avail)))
+        g.box(0, 0, width, rows, p.primary, 0.55, title=title, rounded=True, right=right,
+              title_color=p.primary if d == dt.date.today() else p.fg)
+        r = 1 - self.day_scroll
+        now = dt.datetime.now()
+        for k, x in lines:
+            h = height(k, x)
+            if r + h <= 1:
+                r += h
+                continue
+            if r >= rows - 1:
+                break
+            vis = 1 <= r < rows - 1
+            if k == "ds":
+                n, sa, sb = x
+                active = d == now.date() and sa <= now.time() < sb
+                sel = n - 1 == self.slot
+                head = f" {n}. DS  {sa:%H:%M} – {sb:%H:%M} "
+                if vis:
+                    if sel:
+                        g.fill(1, r, width - 2, 1, p.primary, 0.14)
+                        g.text(1, r, "▶", p.primary)
+                    g.text(2, r, head, p.tones["alert"] if active else p.primary)
+                    g.text(2 + len(head), r, "─" * (width - 4 - len(head)), p.primary, 0.25)
+                    if active:
+                        g.text(width - 9, r, " jetzt ", p.tones["alert"])
+                    g.region(1, r, width - 2, 1, ("slot", d, n - 1))
+            elif k == "pause":
+                pa, pb = x
+                if vis:
+                    g.text(4, r, f"┄┄ Pause {pa:%H:%M}–{pb:%H:%M} ┄┄", p.fg, 0.3)
+            elif k == "head":
+                if vis:
+                    g.text(2, r, f" {x[0]} ", p.fg, 0.6)
+            elif k == "free":
+                if vis:
+                    g.text(6, r, "· frei", p.fg, 0.25)
+                    g.region(1, r, width - 2, 1, ("slot", d, x))
+            elif k == "allday":
+                if vis:
+                    col = p.cat(x.get("cat"), x.get("tone"))
+                    g.fill(2, r, width - 4, 1, col, 0.22)
+                    g.text(2, r, f"▌ganztägig  {x['title']}", col, maxw=width - 4)
+                    g.region(2, r, width - 4, 1, ("event", x))
+            elif k == "event":
+                o = x
+                col = p.cat(o.get("cat"), o.get("tone"))
+                c0, w = 6, width - 8
+                top = max(r, 1)
+                hh = min(r + h, rows - 1) - top
+                if hh > 0:
+                    sel = o["uid"] == self.focus_uid
+                    g.fill(c0, top, w, hh, col, 0.3 if sel else 0.13)
+                    g.region(c0, top, w, hh, ("event", o))
+                    if r >= 1:
+                        span = tudd.ds_span(o["s"].time(), o["e"].time())
+                        ds_txt = (f"{span[0]}. DS" if span[0] == span[1] else f"{span[0]}.–{span[1]}. DS") if span else ""
+                        g.box(c0, r, w, h if r + h < rows else rows - r, col, 1.0 if sel else 0.85,
+                              title=f"{CAT_NAMES.get(o.get('cat'), '')} · {o['title']}",
+                              title_color=p.fg, right=f"{o['s']:%H:%M}–{o['e']:%H:%M} {ds_txt}")
+                    body = []
+                    meta = []
+                    head_len = len(f"{CAT_NAMES.get(o.get('cat'), '')} · {o['title']}") + 22
+                    if head_len > w - 2:              # Zeit passt nicht in den Rahmen → in die Detailzeile
+                        meta.append(f"{o['s']:%H:%M}–{o['e']:%H:%M}")
+                    if o.get("location"):
+                        meta.append("⌂ " + o["location"])
+                    cal = next((c["name"] for c in self.store.all_calendars() if c["id"] == o["cal"]), "")
+                    if o.get("series") or o.get("rrule"):
+                        meta.append("↻ " + (rrule.describe(o["rrule"], o["s"]) if o.get("rrule") else "Serie"))
+                    if o.get("pending"):
+                        meta.append("⟳ noch nicht bei Google")
+                    meta.append("◇ " + cal)
+                    body.append(("   ".join(meta), col))
+                    if o.get("link"):
+                        body.append(("󰌹 " + o["link"], p.tones["secondary"]))
+                    for ln in (o.get("notes") or "").splitlines()[:3]:
+                        body.append((ln, p.fg))
+                    for i, (txt, cc) in enumerate(body):
+                        rr = r + 1 + i
+                        if 1 <= rr < min(r + h - 1, rows - 1):
+                            g.text(c0 + 2, rr, txt, cc, 0.9, maxw=w - 4)
+            r += h
+        if total > avail:
+            frac = self.day_scroll / max(1, total - avail)
+            g.text(width - 1, 1 + int(frac * (rows - 3)), "┃", p.primary)
+
+    # ----- Monat -----
+    def render_month(self, g, cols, rows):
+        p = self.pal
+        first = self.cursor.replace(day=1)
+        start = tudd.week_start(first)
+        weeks = 6
+        end = start + dt.timedelta(days=7 * weeks)
+        occ = self.occ(start, end)
+        by_day = {}
+        for o in occ:
+            d = o["s"].date()
+            last = max(d, (o["e"] - dt.timedelta(seconds=1)).date())
+            while d <= last and d < end:
+                by_day.setdefault(d, []).append(o)
+                d += dt.timedelta(days=1)
+        kwc = 5 if cols >= 48 else 4
+        dw = max(3, (cols - kwc - 1) // 7)
+        width = min(cols, kwc + dw * 7 + 1)
+        lines = rows - 3                               # ohne Titel-, Wochentags- und Abschlusszeile
+        sep = lines >= weeks * 3                       # Trennlinien zwischen Wochen nur, wenn Platz ist
+        hh = max(1, lines // weeks)
+        height = min(rows, 2 + hh * weeks + 1)
+        right = f"KW {tudd.kw(start)}–{tudd.kw(end - dt.timedelta(days=1))}"
+        g.box(0, 0, width, height, p.primary, 0.55, title=f"{MONTHS[first.month - 1]} {first.year}",
+              title_color=p.fg, rounded=True, right=right)
+        for i in range(7):
+            lab = WEEKDAYS_LONG[i] if dw >= 12 else WEEKDAYS[i] if dw >= 3 else WEEKDAYS[i][0]
+            g.text(kwc + i * dw + 1 + (1 if dw >= 5 else 0), 1, lab, p.fg, 0.5 if i >= 5 else 0.85, maxw=dw - 1)
+        g.text(1, 1, "KW", p.fg, 0.5)
+        today = dt.date.today()
+        maxn = max([len(v) for v in by_day.values()] + [1])
+        for w in range(weeks):
+            r = 2 + w * hh
+            wd0 = start + dt.timedelta(days=7 * w)
+            kwn = tudd.kw(wd0)
+            even = kwn % 2 == 0
+            pc = p.primary if even else p.tones["tertiary"]
+            body = r + (1 if sep else 0)              # erste Inhaltszeile
+            bh = hh - (1 if sep else 0)
+            if sep:
+                g.text(0, r, "├" + "─" * (width - 2) + "┤", p.primary, 0.3)
+                for i in range(8):
+                    g.text(kwc + i * dw, r, "┼" if i < 7 else "┤", p.primary, 0.3)
+            g.text(1, body, f"{kwn:>2}" + ("" if bh > 1 else ("g" if even else "u")), pc)
+            if bh > 1:
+                g.text(1, body + 1, "g" if even else "u", pc, 0.7)
+            if even:
+                g.fill(1, body, kwc - 1, bh, pc, 0.06)
+            g.region(1, body, kwc - 1, bh, ("week", wd0))
+            for rr in range(body, body + bh):
+                for i in range(8):
+                    g.text(kwc + i * dw, rr, "│", p.primary, 0.3)
+            for i in range(7):
+                d = wd0 + dt.timedelta(days=i)
+                c = kwc + i * dw + 1
+                cw = dw - 1
+                inmonth = d.month == first.month
+                al = 1.0 if inmonth else 0.35
+                g.region(c, body, cw, bh, ("day", d))
+                if d == self.cursor:
+                    g.fill(c, body, cw, bh, p.primary, 0.16)
+                num = f"{d.day:>2}"
+                nx = c + (1 if cw >= 4 else 0)
+                if d == today:
+                    g.fill(nx, body, 2, 1, p.primary, 1.0)
+                    g.text(nx, body, num, p.on_primary)
+                else:
+                    g.text(nx, body, num, p.fg, al * (0.6 if d.weekday() >= 5 else 1.0))
+                evs = by_day.get(d, [])
+                if not evs:
+                    continue
+                # Dichte: ▁…█ relativ zum vollsten Tag (+ Anzahl, wenn Platz ist)
+                lvl = "▁▂▃▄▅▆▇█"[min(7, round(len(evs) / maxn * 7))]
+                dens = f"{lvl}{len(evs)}" if cw >= 7 else lvl
+                g.text(c + cw - len(dens), body, dens, p.primary, al)
+                room = bh - 1
+                if room <= 0:
+                    continue
+                if cw < 5:                     # schmale Zellen: ein farbiger Punkt je Termin
+                    for j, o in enumerate(evs[:cw]):
+                        g.text(c + j, body + 1, "▪", p.cat(o.get("cat"), o.get("tone")), al)
+                    continue
+                show = evs[:room] if len(evs) <= room else evs[:room - 1]
+                for j, o in enumerate(show):
+                    col = p.cat(o.get("cat"), o.get("tone"))
+                    t = ("" if o.get("allday") or cw < 12 else f"{o['s']:%H:%M} ") + o["title"]
+                    g.text(c, body + 1 + j, "▌", col, al)
+                    g.text(c + 1, body + 1 + j, t, p.fg, 0.85 * al, maxw=cw - 1)
+                if len(evs) > room and room >= 2:
+                    g.text(c + 1, body + room, f"+{len(evs) - len(show)} weitere", p.fg, 0.5 * al, maxw=cw - 1)
+        g.text(0, height - 1, "╰" + "─" * (width - 2) + "╯", p.primary, 0.55)
+        for i in range(7):
+            g.text(kwc + i * dw, height - 1, "┴", p.primary, 0.3)
+
+    def on_hit(self, view, hit, n, button):
+        kind = hit[0]
+        if kind == "event":
+            o = hit[1]
+            self.focus_uid = o["uid"]
+            self.cursor = o["s"].date()
+            if o["s"].time() and not o.get("allday"):
+                span = tudd.ds_span(o["s"].time(), o["e"].time())
+                if span:
+                    self.slot = span[0] - 1
+            if n >= 2 or view == "day" or button == 3:
+                self.edit(o)
+        elif kind == "slot":
+            self.cursor, self.slot = hit[1], hit[2]
+            self.focus_uid = None
+            if n >= 2:
+                self.editor.open(day=self.cursor, ds=self.slot + 1)
+        elif kind == "day":
+            self.cursor = hit[1]
+            self.focus_uid = None
+            if n >= 2:
+                self.win.show_tab("day")
+        elif kind == "week":
+            self.cursor = hit[1]
+            self.win.show_tab("week")
+        self.after_move()
+
+    def edit(self, o):
+        src = self.store.find(o["uid"]) or o
+        ev = {k: v for k, v in o.items() if k not in ("s", "e", "occ")}
+        if src.get("rrule"):          # lokale Serie: diese Instanz mit ihrem Datum zeigen
+            dur = o["e"] - o["s"]
+            ev["start"], ev["end"] = st.iso(o["s"], o.get("allday")), st.iso(o["s"] + dur, o.get("allday"))
+        self.editor.open(ev, orig=o)
+
+    def after_move(self):
+        self.store.settings["cursor"] = self.cursor.isoformat()
+        self.redraw()
+        win = self.store.window
+        if win and gcal.logged_in():
+            a = dt.datetime.fromisoformat(win[0]).date()
+            b = dt.datetime.fromisoformat(win[1]).date()
+            if not (a + dt.timedelta(days=30) <= self.cursor <= b - dt.timedelta(days=60)):
+                self.sync()
+
+    def on_scroll(self, view, n):
+        """n: gesammelte Rasten (Touchpad wird in Cells.gebremst). Blättern höchstens alle 0,25 s."""
+        if view == "day":
+            self.day_scroll = max(0, self.day_scroll + 3 * n)
+            self.views["day"].queue_draw()
+            return
+        if view == "week" and getattr(self, "week_overflow", False):
+            self.slot = max(0, min(6, self.slot + (1 if n > 0 else -1)))   # kleines Fenster: im Raster scrollen
+            self.focus_uid = None
+            self.redraw()
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_last_flip", 0) < 0.25:
+            return
+        self._last_flip = now
+        d = 1 if n > 0 else -1
+        if view == "week":
+            self.move_day(7 * d)
+        else:
+            self.cursor = self.add_months(self.cursor, d)
+            self.after_move()
+
+    @staticmethod
+    def add_months(d, n):
+        m = d.month - 1 + n
+        y = d.year + m // 12
+        m = m % 12 + 1
+        import calendar
+        return d.replace(year=y, month=m, day=min(d.day, calendar.monthrange(y, m)[1]))
+
+    def move_day(self, n):
+        self.cursor += dt.timedelta(days=n)
+        self.focus_uid = None
+        self.after_move()
+
+    def day_events(self, d):
+        return [o for o in self.occ(d, d + dt.timedelta(days=1))]
+
+    def cycle(self, step):
+        evs = self.day_events(self.cursor)
+        if not evs:
+            return
+        uids = [o["uid"] for o in evs]
+        i = uids.index(self.focus_uid) if self.focus_uid in uids else -1
+        o = evs[(i + step) % len(evs)]
+        self.focus_uid = o["uid"]
+        span = tudd.ds_span(o["s"].time(), o["e"].time()) if not o.get("allday") else None
+        if span:
+            self.slot = span[0] - 1
+        self.redraw()
+
+    def focused(self):
+        evs = self.day_events(self.cursor)
+        o = next((o for o in evs if o["uid"] == self.focus_uid), None)
+        if o:
+            return o
+        for o in evs:
+            span = tudd.ds_span(o["s"].time(), o["e"].time()) if not o.get("allday") else None
+            if span and span[0] <= self.slot + 1 <= span[1]:
+                return o
+        return None
+
+    def on_key(self, ctrl, kv, code, state):
+        if self.editor.get_visible() or self.quick_rev.get_reveal_child():
+            return False
+        focus = self.win.get_focus()
+        if isinstance(focus, (Gtk.Text, Gtk.TextView)):
+            return False
+        view = self.win.current_tab()
+        if view == "acct":
+            return False
+        if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
+            return False
+        ch = Gdk.keyval_to_unicode(kv)
+        k = chr(ch) if ch else ""
+        if kv in (Gdk.KEY_Left,):
+            k = "h"
+        elif kv == Gdk.KEY_Right:
+            k = "l"
+        elif kv == Gdk.KEY_Up:
+            k = "k"
+        elif kv == Gdk.KEY_Down:
+            k = "j"
+        if k == "h":
+            self.move_day(-1)
+        elif k == "l":
+            self.move_day(1)
+        elif k in ("j", "k"):
+            d = 1 if k == "j" else -1
+            if view == "month":
+                self.move_day(7 * d)
+            else:
+                self.slot = max(0, min(6, self.slot + d))
+                self.focus_uid = None
+                self.redraw()
+        elif k in ("H", "L", "[", "]"):
+            d = -1 if k in ("H", "[") else 1
+            if view == "month":
+                self.cursor = self.add_months(self.cursor, d)
+                self.after_move()
+            else:
+                self.move_day(d * (1 if view == "day" else 7))
+        elif k == "d":
+            self.win.show_tab("day")
+        elif k == "w":
+            self.win.show_tab("week")
+        elif k == "m":
+            self.win.show_tab("month")
+        elif k == "t":
+            self.go_today()
+        elif k == "n":
+            self.editor.open(day=self.cursor, ds=self.slot + 1)
+        elif k == "a":
+            self.open_quick()
+        elif kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) or k == "e":
+            o = self.focused()
+            if o:
+                self.edit(o)
+            elif view == "month":
+                self.win.show_tab("day")
+            else:
+                self.editor.open(day=self.cursor, ds=self.slot + 1)
+        elif kv == Gdk.KEY_Tab:
+            self.cycle(1)
+        elif kv == Gdk.KEY_ISO_Left_Tab:
+            self.cycle(-1)
+        elif k == "x" or kv == Gdk.KEY_Delete:
+            self.delete_focused()
+        elif k == "s":
+            self.sync(force=True)
+        elif k == "g":
+            self.open_quick(goto=True)
+        elif k == "?":
+            self.help.set_visible(not self.help.get_visible())
+        elif k == "+" or k == "-":
+            size = self.store.settings.get("font_size", 10) + (1 if k == "+" else -1)
+            self.store.settings["font_size"] = max(7, min(16, size))
+            self.store.save_settings()
+            self.redraw()
+        else:
+            return False
+        return True
+
+    def delete_focused(self):
+        o = self.focused()
+        if not o:
+            return
+        if self.del_armed != o["uid"]:
+            self.del_armed = o["uid"]
+            scope = " (nur dieser termin – serie im editor)" if o.get("series") or o.get("rrule") else ""
+            self.win.say(f"„{o['title']}“ löschen? nochmal x{scope}")
+            GLib.timeout_add(3000, lambda: setattr(self, "del_armed", None) or False)
+            return
+        self.del_armed = None
+        scope = "instance" if (o.get("series") or o.get("rrule")) else "single"
+        src = self.store.find(o["uid"]) or o
+        self.store.delete_event(src if scope == "single" else o, scope=scope, original=o)
+        self.focus_uid = None
+        self.after_edit(f"gelöscht: {o['title']}")
+
+    # ----- Schnelleingabe -----
+    def open_quick(self, goto=False):
+        self.quick_goto = goto
+        self.quick.set_placeholder_text("gehe zu: heute, mi, +2w, 20.10., 2027-01-15" if goto else
+                                        "schnell: V Mathe mi 2ds @POT/81/H #v !u bis 5.2.   (esc abbrechen)")
+        self.quick.set_text("")
+        self.quick_rev.set_reveal_child(True)
+        GLib.idle_add(lambda: self.quick.grab_focus() and False)
+
+    def close_quick(self):
+        self.quick_rev.set_reveal_child(False)
+        self.focus_view()
+
+    def quick_add(self):
+        text = self.quick.get_text().strip()
+        if not text:
+            self.close_quick()
+            return
+        if self.quick_goto:
+            try:
+                self.cursor = tudd.parse_date(text, self.cursor)
+            except ValueError as e:
+                self.win.say(str(e), error=True)
+                return
+            self.close_quick()
+            self.after_move()
+            return
+        try:
+            ev, rule_pid, until = self.parse_quick(text)
+        except ValueError as e:
+            self.win.say(str(e), error=True)
+            return
+        if rule_pid:
+            s = st.parse_when(ev["start"], False)
+            r, s2 = rrule.preset_rule(rule_pid, s, until=until)
+            if s2 != s:
+                dur = st.parse_when(ev["end"], False) - s
+                ev["start"], ev["end"] = st.iso(s2), st.iso(s2 + dur)
+            ev["rrule"] = r
+        self.store.save_event(ev)
+        self.cursor = st.parse_when(ev["start"], ev.get("allday")).date()
+        self.close_quick()
+        self.after_edit(f"angelegt: {ev['title']} · {tudd.fmt_date(self.cursor)}"
+                        + (f" · {rrule.describe(ev['rrule'], st.parse_when(ev['start'], False))}" if ev.get("rrule") else ""))
+
+    def parse_quick(self, text):
+        day, t_from, t_to, ds = self.cursor, None, None, None
+        loc, link, cat, rule, until = "", "", "", None, None
+        words = []
+        toks = text.split()
+        i = 0
+        cats = {"v": "vorlesung", "vl": "vorlesung", "ü": "uebung", "ue": "uebung", "s": "seminar", "p": "praktikum",
+                "prak": "praktikum", "!": "pruefung", "prüf": "pruefung", "pr": "pruefung", "k": "pruefung",
+                "privat": "privat", "priv": "privat", "x": "sonst"}
+        rules = {"!w": "weekly", "!g": "even", "!u": "odd", "!kg": "kweven", "!ku": "kwodd", "!m": "monthly",
+                 "!t": "daily", "!j": "yearly"}
+        while i < len(toks):
+            t = toks[i]
+            tl = t.lower()
+            m_ds = re.fullmatch(r"(\d)\.?(?:-(\d)\.?)?\s*ds", tl) or re.fullmatch(r"ds(\d)(?:-(\d))?", tl)
+            m_t = re.fullmatch(r"(\d{1,2}(?::\d{2})?)-(\d{1,2}(?::\d{2})?)", tl)
+            if m_ds:
+                a, b = int(m_ds.group(1)), int(m_ds.group(2) or m_ds.group(1))
+                if not (1 <= a <= 7 and 1 <= b <= 7):
+                    raise ValueError("DS 1–7")
+                t_from, t_to = tudd.ds_times(a)[0], tudd.ds_times(b)[1]
+            elif m_t:
+                t_from, t_to = tudd.parse_time(m_t.group(1)), tudd.parse_time(m_t.group(2))
+            elif t.startswith("@") and len(t) > 1:
+                loc = t[1:]
+            elif t.startswith("#") and tl[1:] in cats:
+                cat = cats[tl[1:]]
+            elif tl in rules:
+                rule = rules[tl]
+            elif tl == "bis" and i + 1 < len(toks):
+                until = tudd.parse_date(toks[i + 1])
+                i += 1
+            elif re.match(r"https?://|www\.", tl):
+                link = t
+            else:
+                try:
+                    if re.fullmatch(r"heute|morgen|übermorgen|[+-]\d+[dtw]?|\d{1,2}\.\d{1,2}\.?\d{0,4}|"
+                                    r"(mo|di|mi|do|fr|sa|so)|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag",
+                                    tl):
+                        day = tudd.parse_date(tl)
+                    else:
+                        words.append(t)
+                except ValueError:
+                    words.append(t)
+            i += 1
+        title = " ".join(words) or "(ohne Titel)"
+        if t_from is None:
+            t_from, t_to = tudd.ds_times(self.slot + 1)
+        s, e = dt.datetime.combine(day, t_from), dt.datetime.combine(day, t_to)
+        if e <= s:
+            e = s + dt.timedelta(minutes=90)
+        ev = {"cal": self.store.default_cal(), "title": title, "allday": False, "start": st.iso(s), "end": st.iso(e),
+              "location": loc, "link": link, "notes": "", "cat": cat or tudd.guess_cat(title), "tone": "", "rrule": None}
+        return ev, rule, until
+
+    # =================================================================
+    # Hilfe & Konto
+    # =================================================================
+    def build_help(self):
+        rows = [("h j k l / ←↓↑→", "Tag bzw. Doppelstunde wechseln (Monat: Tag/Woche)"),
+                ("H L / [ ]", "voriger/nächster Zeitraum"), ("d w m", "Tag-, Wochen-, Monatsansicht"),
+                ("t", "heute"), ("g", "gehe zu Datum"), ("n", "neuer Termin im markierten DS"),
+                ("a", "Schnelleingabe:  V Mathe mi 2ds @POT/81/H #v !u bis 5.2."),
+                ("⏎ / e", "markierten Termin bearbeiten"), ("tab", "nächster Termin des Tages"),
+                ("x x", "Termin löschen"), ("s / strg+r", "mit Google abgleichen"), ("+ −", "Schrift größer/kleiner"),
+                ("1–4", "Tabs"), ("esc", "schließen")]
+        quick = [("2ds  2-3ds  14-16", "Zeit: Doppelstunde(n) oder Uhrzeit"), ("mi  morgen  +3  20.10.", "Tag"),
+                 ("@POT/81/H", "Ort"), ("#v #ü #s #p #! #privat", "Typ"),
+                 ("!w !g !u !kg !ku !m", "wöchentl., 2-wö. gerade/ungerade, jede gerade/ungerade KW, monatl."),
+                 ("bis 5.2.", "Serienende"), ("https://…", "Link")]
+        p = tui.Panel("tasten")
+        p.set_active(True)
+        for k, v in rows:
+            p.body.append(hbox(label(k, "accent", xalign=0), label(v, "help"), spacing=12))
+            p.body.get_last_child().get_first_child().set_size_request(170, -1)
+        p.body.append(label("schnelleingabe", "dim", xalign=0))
+        for k, v in quick:
+            p.body.append(hbox(label(k, "accent"), label(v, "help"), spacing=12))
+            p.body.get_last_child().get_first_child().set_size_request(170, -1)
+        box = vbox(p, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+        box.add_css_class("editor-card")
+        return box
+
+    def build_account(self):
+        self.acct = vbox(spacing=8)
+        self.acct.set_margin_top(4)
+        # Google
+        self.g_panel = tui.Panel("google kalender")
+        self.g_status = label("", markup=True, wrap=True)
+        self.g_steps = vbox(spacing=4)
+        self.g_btns = hbox(spacing=8)
+        self.g_panel.body.append(self.g_status)
+        self.g_panel.body.append(self.g_steps)
+        self.g_panel.body.append(self.g_btns)
+        self.acct.append(self.g_panel)
+        self.c_panel = tui.Panel("kalender")
+        self.c_list = vbox(spacing=2)
+        self.c_panel.body.append(self.c_list)
+        self.acct.append(self.c_panel)
+        self.f_panel = tui.Panel("farben · aus matugen")
+        self.f_area = Gtk.DrawingArea(content_height=60, hexpand=True)
+        self.f_area.set_draw_func(self.draw_legend)
+        self.f_panel.body.append(self.f_area)
+        self.acct.append(self.f_panel)
+        self.v_panel = tui.Panel("darstellung")
+        self.v_week = tui.Check("wochenende in der wochenansicht", self.store.settings.get("weekend", True),
+                                lambda on: (self.store.settings.__setitem__("weekend", on), self.store.save_settings(),
+                                            self.redraw()))
+        self.v_see = tui.Check("interne fenster durchsichtig (editor, hilfe)", self.store.settings.get("see_through", True),
+                               lambda on: (self.store.settings.__setitem__("see_through", on), self.store.save_settings(),
+                                           self.apply_see_through()))
+        self.v_panel.body.append(wrapbox(self.v_week, self.v_see, label("schrift: + / − in den ansichten", "dim")))
+        self.acct.append(self.v_panel)
+        self.refresh_account()
+        return self.acct
+
+    def draw_legend(self, area, cr, w, h):
+        p = Palette()
+        lay = area.create_pango_layout("")
+        lay.set_font_description(Pango.FontDescription.from_string(f"{tui.FONT} Bold 10"))
+        x, y = 0, 4
+        for k, name, short, _ in CATS:
+            col = p.cat(k)
+            text = f"▌{short} {name}"
+            lay.set_text(text, -1)
+            tw, th = lay.get_pixel_size()
+            if x + tw > w:
+                x, y = 0, y + th + 6
+            cr.set_source_rgba(*col, 0.2)
+            cr.rectangle(x, y - 1, tw + 8, th + 2)
+            cr.fill()
+            cr.set_source_rgba(*col, 1)
+            cr.move_to(x + 2, y)
+            PangoCairo.show_layout(cr, lay)
+            x += tw + 22
+        area.set_content_height(y + 30)
+
+    def refresh_account(self):
+        tui.clear(self.g_steps)
+        tui.clear(self.g_btns)
+        has_client = bool(gcal.client())
+        logged = gcal.logged_in()
+        if logged and gcal.expired():
+            n = len(self.store.pending)
+            self.g_status.set_markup(
+                f"<span foreground='{self.hex('tertiary')}'>⚠ Anmeldung abgelaufen</span> – im Testmodus lässt Google "
+                f"sie nach 7 Tagen verfallen. Deine Termine bleiben im Cache"
+                + (f", {n} Änderung{'en' if n != 1 else ''} warten auf den Abgleich." if n else "."))
+            self.g_btns.set_layout_manager(WrapLayout(spacing=8))
+            self.g_btns.append(tui.Button("abbrechen" if self.login else "neu anmelden",
+                                          self.cancel_login if self.login else self.start_login))
+            self.g_btns.append(tui.Button("abmelden", self.logout, danger=True))
+        elif logged:
+            n = len(self.store.pending)
+            when = dt.datetime.fromisoformat(self.store.synced).strftime("%d.%m. %H:%M") if self.store.synced else "–"
+            since = gcal.signed_in_at()
+            valid = ""
+            if since:
+                a = dt.datetime.fromtimestamp(since)
+                valid = f" · angemeldet am {a:%d.%m.} (im Testmodus gültig bis {a + dt.timedelta(days=7):%d.%m. %H:%M})"
+            self.g_status.set_markup(f"<span foreground='{self.hex('primary')}'>●</span> angemeldet · zuletzt "
+                                     f"abgeglichen {when} · {n} änderung{'en' if n != 1 else ''} offen{valid}")
+            for e in self.last_errors[:3]:
+                self.g_steps.append(label("✗ " + e, "warn", wrap=True))
+            self.g_btns.set_layout_manager(WrapLayout(spacing=8))
+            self.g_btns.append(tui.Button("jetzt abgleichen", lambda: self.sync(force=True)))
+            self.g_btns.append(tui.Button("abmelden", self.logout, danger=True))
+        else:
+            self.g_status.set_markup("○ nicht angemeldet – alles läuft lokal (Kalender „Lokal“), "
+                                     "Google kommt dazu, sobald du angemeldet bist")
+            steps = [
+                ("1", "Google-Cloud-Projekt anlegen und „Google Calendar API“ aktivieren",
+                 "https://console.cloud.google.com/apis/library/calendar-json.googleapis.com"),
+                ("2", "Google Auth Platform einrichten: Zielgruppe „Extern“, App-Name z. B. kalender, unter "
+                      "„Zielgruppe → Testnutzer“ dein Google-Konto eintragen. Nicht veröffentlichen (geht nur mit "
+                      "eigener Domain) – im Testmodus läuft die Anmeldung alle 7 Tage ab, der Kalender zeigt dann "
+                      "„⚠ neu anmelden“.",
+                 "https://console.cloud.google.com/auth/overview"),
+                ("3", "Clients → „+ Client erstellen“ → Anwendungstyp „Desktop-App“ → Erstellen. Im Fenster danach "
+                      "„JSON herunterladen“ – oder Client-ID und Clientschlüssel kopieren (Schritt 4b)",
+                 "https://console.cloud.google.com/auth/clients"),
+            ]
+            for n, text, url in steps:
+                self.g_steps.append(hbox(label(n, "accent"), label(text, wrap=True, hexpand=True),
+                                         tui.Button("öffnen", lambda u=url: Gio.AppInfo.launch_default_for_uri(u, None)),
+                                         spacing=10))
+            ok = "✓ geladen" if has_client else ""
+            self.g_steps.append(hbox(label("4", "accent"), label("heruntergeladene client_secret_….json laden",
+                                                                hexpand=True, wrap=True),
+                                     label(ok, "accent"), tui.Button("json laden", self.pick_client), spacing=10))
+            # ohne JSON: Client-ID und Schlüssel von Hand
+            self.cid_entry = tui.Entry("Client-ID (…apps.googleusercontent.com)")
+            self.csec_entry = tui.Entry("Clientschlüssel (GOCSPX-…)", password=True)
+            self.g_steps.append(hbox(label("4b", "accent"), wrapbox(label("oder von hand:", "dim"), self.cid_entry,
+                                                                    self.csec_entry,
+                                                                    tui.Button("übernehmen", self.manual_client)),
+                                     spacing=10))
+            self.cid_entry.set_width_chars(34)
+            self.csec_entry.set_width_chars(24)
+            self.g_steps.append(hbox(label("5", "accent"), label("im Browser (Zen) anmelden und Zugriff erlauben",
+                                                                hexpand=True, wrap=True),
+                                     tui.Button("abbrechen" if self.login else "mit google anmelden",
+                                                self.cancel_login if self.login else self.start_login), spacing=10))
+            if not has_client:
+                self.g_steps.get_last_child().set_sensitive(False)
+        # Kalenderliste
+        tui.clear(self.c_list)
+        default = self.store.default_cal()
+        for c in self.store.all_calendars():
+            vis = self.store.visible(c["id"])
+            chk = tui.Check(c["name"], vis, lambda on, cid=c["id"]: self.set_visible(cid, on))
+            writable = c.get("role") in ("owner", "writer")
+            std = tui.Button("● standard" if c["id"] == default else "standard für neue",
+                             lambda cid=c["id"]: self.set_default(cid))
+            std.set_sensitive(writable and c["id"] != default)
+            role = {"owner": "eigener", "writer": "schreiben", "reader": "nur lesen",
+                    "freeBusyReader": "nur frei/belegt"}.get(c.get("role"), "")
+            self.c_list.append(wrapbox(chk, label(role, "dim"), std, spacing=10))
+        self.f_area.queue_draw()
+
+    def hex(self, name):
+        c = tui.colors().get(name)
+        return "#%02x%02x%02x" % (int(c.red * 255), int(c.green * 255), int(c.blue * 255)) if c else "#ffffff"
+
+    def set_visible(self, cid, on):
+        self.store.settings.setdefault("visible", {})[cid] = on
+        self.store.save_settings()
+        self.redraw()
+
+    def set_default(self, cid):
+        self.store.settings["default_cal"] = cid
+        self.store.save_settings()
+        self.refresh_account()
+
+    def manual_client(self):
+        try:
+            gcal.install_client_manual(self.cid_entry.get_text(), self.csec_entry.get_text())
+        except ValueError as e:
+            self.win.say(str(e), error=True)
+            return
+        self.win.say("OAuth-Client übernommen – jetzt anmelden (Schritt 5)")
+        self.refresh_account()
+
+    def pick_client(self):
+        dlg = Gtk.FileDialog(title="client_secret.json wählen")
+        f = Gtk.FileFilter()
+        f.set_name("JSON")
+        f.add_pattern("*.json")
+        store = Gio.ListStore.new(Gtk.FileFilter)
+        store.append(f)
+        dlg.set_filters(store)
+        dl = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DOWNLOAD)
+        if dl:
+            dlg.set_initial_folder(Gio.File.new_for_path(dl))
+
+        def done(d, res):
+            try:
+                path = d.open_finish(res).get_path()
+                gcal.install_client(path)
+                self.win.say("OAuth-Client geladen – jetzt anmelden (Schritt 5)")
+            except GLib.Error:
+                return
+            except (ValueError, OSError) as e:
+                self.win.say(str(e), error=True)
+            self.refresh_account()
+        dlg.open(self.win, None, done)
+
+    def start_login(self):
+        self.login = gcal.Login(lambda url: GLib.idle_add(
+            lambda: Gio.AppInfo.launch_default_for_uri(url, None) and False))
+        self.win.say("Browser geöffnet – bei Google anmelden und Zugriff erlauben")
+        self.refresh_account()
+        self.update_header()
+
+        def done(res):
+            self.login = None
+            if isinstance(res, Exception):
+                self.win.say(f"Anmeldung: {res}", error=True)
+            else:
+                self.win.say("angemeldet ✓ – gleiche ab …")
+                self.store.window = None
+                self.sync(force=True)
+            self.refresh_account()
+            self.update_header()
+        tui.background(self.login.run, done=done)
+
+    def cancel_login(self):
+        if self.login:
+            self.login.cancelled = True
+
+    def logout(self):
+        gcal.logout()
+        self.store.google = {}
+        self.store.calendars = []
+        self.store.synced = None
+        self.store.save_cache()
+        self.win.say("abgemeldet – Google-Termine aus dem Cache entfernt, lokale bleiben")
+        self.refresh_account()
+        self.redraw()
+
+
+if __name__ == "__main__":
+    sys.exit(Kalender().run(sys.argv))
