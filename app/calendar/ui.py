@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# kalender – TUI-Kalender im musicminus-Stil (Super+K). Ansichten Tag/Woche/Monat im DS-Raster der TU Dresden,
+# datist – TUI-Kalender im musicalist-Stil (Super+K). Ansichten Tag/Woche/Monat im DS-Raster der TU Dresden,
 # Google-Kalender-Abgleich (gcal.py) mit Offline-Cache (store.py), Farben live aus matugen.
 # Tasten: h/j/k/l bewegen, H/L Zeitraum, d/w/m Ansicht, t heute, n neu, a Schnelleingabe, ⏎ bearbeiten,
 #         x löschen, Tab nächster Termin, g Datum, s abgleichen, ? Hilfe, Esc schließen.
@@ -23,7 +23,7 @@ import rrule
 import store as st
 import gcal
 
-APP_ID = "de.invincible.Kalender"
+APP_ID = "de.invincible.Datist"
 SYNC_EVERY = 300          # Sekunden
 TONES = [("primary", "Primär"), ("analog", "Analog −60°"), ("analog2", "Analog +60°"), ("secondary", "Sekundär"),
          ("tertiary", "Tertiär"), ("complement", "Komplementär"),
@@ -745,7 +745,7 @@ class Kalender(Gtk.Application):
             tui.CSS += CSS
             tui.Theme.get().load()
         tabs = [("day", "tag", "󰃭"), ("week", "woche", "󰸗"), ("month", "monat", "󰃰"), ("acct", "konto", "󰀄")]
-        win = tui.TuiWindow(self, "kalender", tabs, size=(1180, 780),
+        win = tui.TuiWindow(self, "datist", tabs, size=(1180, 780),
                             hints=(("hjkl", "nav"), ("n", "neu"), ("a", "schnell"), ("t", "heute"), ("?", "hilfe")))
         win.APP_ID = APP_ID
         self.win = win
@@ -1965,7 +1965,7 @@ class Kalender(Gtk.Application):
             steps = [
                 ("1", "Google-Cloud-Projekt anlegen und „Google Calendar API“ aktivieren",
                  "https://console.cloud.google.com/apis/library/calendar-json.googleapis.com"),
-                ("2", "Google Auth Platform einrichten: Zielgruppe „Extern“, App-Name z. B. kalender, unter "
+                ("2", "Google Auth Platform einrichten: Zielgruppe „Extern“, App-Name z. B. datist, unter "
                       "„Zielgruppe → Testnutzer“ dein Google-Konto eintragen. Nicht veröffentlichen (geht nur mit "
                       "eigener Domain) – im Testmodus läuft die Anmeldung alle 7 Tage ab, der Kalender zeigt dann "
                       "„⚠ neu anmelden“.",

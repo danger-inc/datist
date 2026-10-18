@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# kalender installieren (ins eigene Benutzerverzeichnis).   ./install.sh [--update]
+# datist installieren (ins eigene Benutzerverzeichnis).   ./install.sh [--update]
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RICE="$HOME/.local/share/rice-apps"
@@ -15,8 +15,10 @@ fi
 mkdir -p "$RICE/calendar" "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"
 cp -f "$SRC"/app/calendar/*.py "$RICE/calendar/"
 cp -f "$SRC/app/tui.py" "$SRC/app/glass.py" "$RICE/"          # gemeinsame Bausteine der Suite
-install -m 755 "$SRC/kalender.sh" "$HOME/.local/bin/kalender"
-sed "s|@EXEC@|$HOME/.local/bin/kalender|g" "$SRC/kalender.desktop.in" > "$HOME/.local/share/applications/kalender.desktop"
-cp -f "$SRC/kalender.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/kalender.svg"
-echo "Fertig. Starten mit: kalender   (Tipp Hyprland: bind = SUPER, K, exec, kalender)"
+install -m 755 "$SRC/datist.sh" "$HOME/.local/bin/datist"
+sed "s|@EXEC@|$HOME/.local/bin/datist|g" "$SRC/datist.desktop.in" > "$HOME/.local/share/applications/datist.desktop"
+cp -f "$SRC/datist.svg" "$HOME/.local/share/icons/hicolor/scalable/apps/datist.svg"
+# alter Name „kalender“ (bis 2026-10) – Termine/Anmeldung bleiben in ~/.local/share/kalender
+rm -f "$HOME/.local/bin/kalender" "$HOME/.local/share/applications/kalender.desktop" "$HOME/.local/share/icons/hicolor/scalable/apps/kalender.svg"
+echo "Fertig. Starten mit: datist   (Tipp Hyprland: bind = SUPER, K, exec, datist)"
 echo "Google-Abgleich: in der App unter „konto“ – eigener OAuth-Client nötig (Anleitung dort)."

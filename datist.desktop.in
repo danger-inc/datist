@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Kalender
+Name=datist
 GenericName=Kalender
 Comment=Kalender mit TU-Dresden-Stundenraster und Google-Abgleich
 Exec=@EXEC@
-Icon=kalender
+Icon=datist
 Terminal=false
 Categories=Office;Calendar;
-Keywords=kalender;calendar;termine;stundenplan;tu dresden;ds;google;
-StartupWMClass=de.invincible.Kalender
+Keywords=datist;kalender;calendar;termine;stundenplan;tu dresden;ds;google;
+StartupWMClass=de.invincible.Datist

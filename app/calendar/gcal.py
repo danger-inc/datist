@@ -207,7 +207,7 @@ class Login:
                 msg = "Angemeldet – du kannst den Tab schließen." if ok else "Anmeldung abgebrochen."
                 self.wfile.write(
                     f"<html><body style='background:#111;color:#ddd;font:16px monospace;padding:3em'>"
-                    f"<pre>┌──────────────────────────────────────────┐\n│ kalender · {msg:<30}│\n"
+                    f"<pre>┌──────────────────────────────────────────┐\n│ datist · {msg:<30}│\n"
                     f"└──────────────────────────────────────────┘</pre></body></html>".encode())
 
             def log_message(self, *a):

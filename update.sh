@@ -3,4 +3,4 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 git pull --ff-only
 ./install.sh --update
-echo "kalender aktualisiert – einmal schließen und neu öffnen."
+echo "datist aktualisiert – einmal schließen und neu öffnen."

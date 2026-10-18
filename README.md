@@ -1,4 +1,4 @@
-# kalender
+# datist
 
 Kalender im Terminal-Look der Suite (GTK4): Wochen- und Monatsansicht mit dem Stundenraster der TU Dresden
 (Doppelstunden, Kalenderwochen gerade/ungerade), Kategorien, Wiederholungen, Offline-Speicher und Abgleich mit
@@ -8,11 +8,11 @@ Google Kalender.
 
 ```bash
 gh auth login                                   # einmalig (Repo ist privat)
-gh repo clone invincible-nix/kalender ~/kalender-src
-cd ~/kalender-src && ./install.sh
+gh repo clone invincible-nix/datist ~/datist-src
+cd ~/datist-src && ./install.sh
 ```
 
-Starten mit `kalender` (oder aus dem Menü). Hyprland: `bind = SUPER, K, exec, kalender` – die Taste blendet ein und aus.
+Starten mit `datist` (oder aus dem Menü). Hyprland: `bind = SUPER, K, exec, datist` – die Taste blendet ein und aus.
 
 ## Google-Abgleich
 

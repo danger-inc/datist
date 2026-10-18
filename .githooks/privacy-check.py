@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Datenschutz-Prüfung für das kalender-Repo. Bricht ab, wenn persönliche Daten mitkommen würden.
+"""Datenschutz-Prüfung für das datist-Repo. Bricht ab, wenn persönliche Daten mitkommen würden.
 
   privacy-check.py           prüft alle Dateien im Arbeitsverzeichnis
   privacy-check.py --staged  prüft die vorgemerkten Dateien (läuft als pre-commit-Hook)
