@@ -762,6 +762,7 @@ class Kalender(Gtk.Application):
         self.relogin_btn.set_visible(False)
         for w in (self.relogin_btn, self.sync_badge, self.prev_btn, self.today_btn, self.next_btn, self.kw_badge):
             win.header_extra.append(w)
+        win.add_changelog("datist", os.path.dirname(os.path.realpath(__file__)))
         self.header_compact = False
         win.on_resize = self.on_resize
         # Kopfleiste darf die Mindestbreite nicht bestimmen: in einen Container, der notfalls abschneidet,
