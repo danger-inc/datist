@@ -1,5 +1,14 @@
 # datist – Änderungen
 
+## 1.3.1 (2026-10-20)
+- `datist --tab acct` (bzw. day, week, month) öffnet direkt diesen Tab – scourge nutzt das für
+  „einstellungen“.
+
+## 1.3.0 (2026-10-20)
+- **Erinnerungen aus notist** erscheinen als 15-Minuten-Termine „󰂚 Titel“ – im Kalender, den du in notist wählst
+  (lokal oder Google). Ändert oder löscht du die Erinnerung in notist, zieht datist sofort nach; „öffnen“ im Termin
+  springt zum Eintrag in notist.
+
 ## 1.2.0 (2026-10-19)
 - **Changelog**: oben rechts steht jetzt die Version – Klick darauf zeigt, was sich geändert hat. Nach einem
   Update ist sie hervorgehoben und die Statuszeile sagt einmal Bescheid.

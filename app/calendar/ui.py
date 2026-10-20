@@ -624,6 +624,15 @@ class Editor(Gtk.Box):
 
     def open_link(self):
         url = self.link.get_text().strip()
+        if url.startswith(st.NOTIST_LINK):           # Erinnerung aus notist → Eintrag dort öffnen
+            import shutil, subprocess
+            exe = shutil.which("notist") or os.path.expanduser("~/.local/bin/notist")
+            try:
+                subprocess.Popen([exe, "--note", url[len(st.NOTIST_LINK):]], start_new_session=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                self.win.say("notist nicht gefunden", error=True)
+            return
         if url:
             if "://" not in url:
                 url = "https://" + url
@@ -714,6 +723,20 @@ class Kalender(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID)
         self.win = None
+
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        act = Gio.SimpleAction.new("show-tab", GLib.VariantType.new("s"))
+        act.connect("activate", lambda a, v: self.show_tab_now(v.get_string()))
+        self.add_action(act)
+
+    def show_tab_now(self, tid):
+        if not self.win:
+            self.build()
+        getattr(tui.glass, "bring_here", lambda w: None)(self.win)
+        self.win.present()
+        if tid in ("day", "week", "month", "acct"):
+            self.win.show_tab(tid)
 
     def do_activate(self):
         if self.win and self.win.get_visible() and self.win.is_active():
@@ -858,6 +881,33 @@ class Kalender(Gtk.Application):
         GLib.timeout_add_seconds(30, lambda: self.redraw() or True)      # Jetzt-Linie
         Gio.NetworkMonitor.get_default().connect("network-changed", lambda m, up: up and self.sync())
         GLib.idle_add(lambda: self.sync() and False)
+        self.watch_notist()
+
+    # ----- Erinnerungen aus notist -----
+    def watch_notist(self):
+        """notist schreibt seine Erinnerungen nach data/notist.json → als Termine übernehmen, sobald sie sich ändert."""
+        self.take_notist()
+        try:
+            f = Gio.File.new_for_path(os.path.join(st.DATA, st.NOTIST_FILE))
+            self._notist_mon = f.monitor_file(Gio.FileMonitorFlags.WATCH_MOVES, None)
+            self._notist_mon.connect("changed", lambda *_: self._notist_soon())
+        except GLib.Error:
+            pass
+        self._notist_id = None
+
+    def _notist_soon(self):
+        if getattr(self, "_notist_id", None):
+            GLib.source_remove(self._notist_id)
+        self._notist_id = GLib.timeout_add(300, self.take_notist)
+
+    def take_notist(self):
+        self._notist_id = None
+        try:
+            if self.store.sync_notist() and self.store.pending:
+                GLib.timeout_add(800, lambda: self.sync() and False)      # gleich zu Google
+        except Exception as e:  # noqa: BLE001 – notist ist ein Extra, darf datist nie stören
+            print("notist:", e, file=sys.stderr)
+        return False
 
     def apply_see_through(self):
         on = self.store.settings.get("see_through", True)
@@ -1120,7 +1170,8 @@ class Kalender(Gtk.Application):
             lines.append("⌂ " + o["location"])
         lines.append(f"{self.clock(o['s'])}–{self.clock(o['e'])}")
         if o.get("link"):
-            lines.append("󰌹 " + re.sub(r"^https?://(www\.)?", "", o["link"]))
+            lines.append("󰂚 notist" if o["link"].startswith(st.NOTIST_LINK) else
+                         "󰌹 " + re.sub(r"^https?://(www\.)?", "", o["link"]))
         return lines
 
     def draw_event(self, g, o, c, r, w, h, selected=False):
@@ -1455,7 +1506,8 @@ class Kalender(Gtk.Application):
                     meta.append("◇ " + cal)
                     body.append(("   ".join(meta), col))
                     if o.get("link"):
-                        body.append(("󰌹 " + o["link"], p.tones["secondary"]))
+                        body.append(("󰂚 aus notist – im Termin „öffnen“ springt hin" if o["link"].startswith(st.NOTIST_LINK)
+                                     else "󰌹 " + o["link"], p.tones["secondary"]))
                     for ln in (o.get("notes") or "").splitlines()[:3]:
                         body.append((ln, p.fg))
                     for i, (txt, cc) in enumerate(body):
@@ -2122,4 +2174,13 @@ class Kalender(Gtk.Application):
 
 
 if __name__ == "__main__":
+    if "--tab" in sys.argv:                  # datist --tab acct: direkt einen Tab zeigen (z. B. aus scourge)
+        tab = sys.argv[sys.argv.index("--tab") + 1]
+        app = Kalender()
+        app.register(None)
+        if app.get_is_remote():
+            app.activate_action("show-tab", GLib.Variant("s", tab))
+            sys.exit(0)
+        app.connect("activate", lambda a: GLib.idle_add(lambda: (a.show_tab_now(tab), False)[1]))
+        sys.exit(app.run([sys.argv[0]]))
     sys.exit(Kalender().run(sys.argv))

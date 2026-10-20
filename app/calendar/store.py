@@ -17,6 +17,9 @@ import rrule
 from raster import TZ, guess_cat
 
 DATA = os.path.expanduser("~/.local/share/kalender/data")   # bewusst nicht in rice-apps (Backup)
+NOTIST_FILE = "notist.json"      # von notist geschrieben (Erinnerungen), hier nur gelesen
+NOTIST_LINK = "notist:"
+NOTIST_MINUTES = 15
 LOCAL_CAL = {"id": "local", "name": "Lokal (nur dieser Rechner)", "color": None, "role": "owner"}
 
 
@@ -225,6 +228,59 @@ class Store:
             self.queue({"op": "delete", "cal": ev["cal"], "uid": ev["uid"], "gid": target, "scope": scope})
             self.google.pop(ev["uid"], None)
         self.changed()
+
+    # ----- Erinnerungen aus notist -----
+    def notist_events(self):
+        """nid → Termin, erkannt am Link "notist:<id>" (bleibt auch bei Google erhalten)."""
+        out = {}
+        for ev in list(self.google.values()) + list(self.local.values()) + self.pending_events():
+            link = ev.get("link") or ""
+            if link.startswith(NOTIST_LINK) and ev.get("status") != "cancelled":
+                out.setdefault(link[len(NOTIST_LINK):], ev)
+        return out
+
+    def sync_notist(self):
+        """notist legt seine Erinnerungen in data/notist.json ab; hier werden daraus Termine (anlegen, ändern,
+        löschen). notist bestimmt, datist folgt. True, wenn sich etwas geändert hat."""
+        data = _load(NOTIST_FILE, None)
+        if not isinstance(data, dict) or not isinstance(data.get("items"), dict):
+            return False                        # Datei fehlt/kaputt: nichts anfassen
+        cal = data.get("cal") or "local"
+        if cal not in [c["id"] for c in self.writable()]:
+            cal = "local"
+        have = self.notist_events()
+        changed = False
+        for nid, it in data["items"].items():
+            try:
+                start = parse_when(it["start"], False)
+            except (KeyError, ValueError, TypeError):
+                continue
+            title = "󰂚 " + (it.get("title") or "Erinnerung")
+            end = start + dt.timedelta(minutes=NOTIST_MINUTES)
+            ev = have.pop(nid, None)
+            if ev:
+                try:
+                    same = (ev["cal"] == cal and ev.get("title") == title and not ev.get("allday") and
+                            parse_when(ev["start"], False) == start and parse_when(ev["end"], False) == end)
+                except (KeyError, ValueError):
+                    same = False
+                if same:
+                    continue
+                if ev["cal"] != cal:            # anderer Kalender gewählt: dort neu anlegen
+                    self.delete_event(ev)
+                    ev = None
+            new = {"location": "", "notes": "Erinnerung aus notist", "cat": "", "tone": "", "rrule": None,
+                   **(ev or {}), "cal": cal, "title": title, "allday": False, "start": iso(start), "end": iso(end),
+                   "link": NOTIST_LINK + nid}
+            if not ev:
+                new.pop("uid", None)
+                new.pop("gid", None)
+            self.save_event(new)
+            changed = True
+        for ev in have.values():                 # Erinnerung entfernt oder Notiz gelöscht
+            self.delete_event(ev)
+            changed = True
+        return changed
 
     def pending_events(self):
         return [op["event"] for op in self.pending if op["op"] == "create"]
