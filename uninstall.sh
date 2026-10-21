@@ -7,7 +7,7 @@ rm -rf "$RICE/calendar"
 rm -f "$HOME/.local/bin/datist" "$HOME/.local/share/applications/datist.desktop" \
       "$HOME/.local/share/icons/hicolor/scalable/apps/datist.svg"
 # gemeinsame Bausteine nur entfernen, wenn keine andere Suite-App (musicalist, wallist) sie noch braucht
-if [ ! -d "$RICE/music" ] && [ ! -d "$HOME/.local/share/wallist" ] && [ ! -d "$HOME/.local/share/mailist" ]; then
+if [ ! -d "$RICE/music" ] && [ ! -d "$HOME/.local/share/wallist" ] && [ ! -d "$HOME/.local/share/mailist" ] && [ ! -d "$HOME/.local/share/sharist" ]; then
     rm -rf "$RICE/fonts" "$RICE/tui.py" "$RICE/glass.py" "$RICE/__pycache__"
     rmdir "$RICE" 2>/dev/null || true
 fi
