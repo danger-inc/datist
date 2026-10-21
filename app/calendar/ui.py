@@ -790,7 +790,7 @@ class Kalender(Gtk.Application):
         win.on_resize = self.on_resize
         # Kopfleiste darf die Mindestbreite nicht bestimmen: in einen Container, der notfalls abschneidet,
         # bis on_resize die passende Stufe (Symbole statt Text) gewählt hat
-        root = win.get_child()
+        root = win.root
         root.remove(win.topbar)
         self.top_clip = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL,
                                            vscrollbar_policy=Gtk.PolicyType.NEVER, propagate_natural_height=True,
