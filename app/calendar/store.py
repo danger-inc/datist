@@ -66,6 +66,7 @@ class Store:
         self.pending = _load("pending.json", [])        # [op]
         self.settings = _load("settings.json", {})
         self.listeners = []
+        self.color_for = None       # ev → Google-Farb-ID (setzt die Oberfläche, kennt die Palette)
 
     # ----- Speichern -----
     def save_cache(self):
@@ -176,6 +177,11 @@ class Store:
         original: die angezeigte Instanz (für scope='instance' bei Serien)."""
         ev = copy.deepcopy(ev)
         ev.setdefault("cat", guess_cat(ev.get("title")))
+        if ev["cal"] != "local" and self.color_for:
+            try:
+                ev["gcolor"] = self.color_for(ev)
+            except Exception:  # noqa: BLE001 – Farbe ist ein Extra
+                pass
         if ev["cal"] == "local":
             self._save_local(ev, scope, original)
         else:
@@ -281,6 +287,28 @@ class Store:
             self.delete_event(ev)
             changed = True
         return changed
+
+    def color_fixes(self, all_events=False, skip=()):
+        """Google-Termine aus datist, deren Farbe in Google nicht passt → Farb-Aufträge (Serie: einmal am Original).
+        all_events=False: nur Termine ganz ohne Google-Farbe (ältere, die dort blau erscheinen)."""
+        if not self.color_for:
+            return []
+        own = {c["id"] for c in self.calendars if c.get("role") in ("owner", "writer")}
+        queued = {op["gid"] for op in self.pending if op["op"] in ("color", "update", "delete")} | set(skip)
+        done = []
+        for ev in list(self.google.values()):
+            if not ev.get("dmeta") or ev["cal"] not in own or ev.get("pending"):
+                continue
+            if not all_events and ev.get("color_id"):
+                continue
+            want = self.color_for(ev)
+            gid = ev.get("series") or ev.get("gid")
+            if not want or not gid or want == ev.get("color_id") or gid in queued:
+                continue
+            queued.add(gid)
+            self.queue({"op": "color", "cal": ev["cal"], "uid": ev["uid"], "gid": gid, "colorId": want})
+            done.append(gid)
+        return done
 
     def pending_events(self):
         return [op["event"] for op in self.pending if op["op"] == "create"]

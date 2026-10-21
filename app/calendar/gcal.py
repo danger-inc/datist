@@ -300,7 +300,10 @@ def to_google(ev):
     body = {"summary": ev.get("title") or "(ohne Titel)", "location": ev.get("location") or "",
             "description": notes,
             "extendedProperties": {"private": {"cat": ev.get("cat") or "", "tone": ev.get("tone") or "",
-                                               "link": ev.get("link") or ""}}}
+                                               "link": ev.get("link") or "",
+                                               "sem": json.dumps(ev["sem"]) if ev.get("sem") else ""}}}
+    if ev.get("gcolor"):                    # Farbe im Google-Kalender (nächste der 11 Google-Farben)
+        body["colorId"] = ev["gcolor"]
     if ev.get("allday"):
         body["start"], body["end"] = {"date": ev["start"][:10]}, {"date": ev["end"][:10]}
     else:
@@ -309,9 +312,13 @@ def to_google(ev):
     if ev.get("rrule") is not None:
         body["recurrence"] = ["RRULE:" + ev["rrule"]] if ev.get("rrule") else []
         if ev.get("rrule") and ev.get("exdates"):
-            body["recurrence"] += ["EXDATE;TZID=" + TZ_NAME + ":" +
-                                   ",".join(st.parse_when(x, False).strftime("%Y%m%dT%H%M%S")
-                                            for x in ev["exdates"] if len(x) > 10)]
+            timed = [x for x in ev["exdates"] if len(x) > 10]
+            days = [x for x in ev["exdates"] if len(x) == 10]
+            if timed and not ev.get("allday"):
+                body["recurrence"] += ["EXDATE;TZID=" + TZ_NAME + ":" +
+                                       ",".join(st.parse_when(x, False).strftime("%Y%m%dT%H%M%S") for x in timed)]
+            if days and ev.get("allday"):
+                body["recurrence"] += ["EXDATE;VALUE=DATE:" + ",".join(x.replace("-", "") for x in days)]
     return body
 
 
@@ -330,17 +337,46 @@ def from_google(g, cal):
     return {"uid": g["id"], "gid": g["id"], "cal": cal, "series": g.get("recurringEventId"),
             "title": title, "start": s, "end": e, "allday": allday, "location": g.get("location") or "",
             "link": link, "notes": desc, "cat": priv.get("cat") or guess_cat(title), "tone": priv.get("tone") or "",
-            "rrule": None, "status": g.get("status"), "html": g.get("htmlLink"), "updated": g.get("updated")}
+            "rrule": None, "status": g.get("status"), "html": g.get("htmlLink"), "updated": g.get("updated"),
+            "sem": _sem(priv.get("sem")), "color_id": g.get("colorId"), "dmeta": bool(priv.get("cat"))}
+
+
+def _sem(v):
+    try:
+        return json.loads(v) if v else None
+    except ValueError:
+        return None
+
+
+def _exdates(line):
+    """EXDATE;TZID=Europe/Berlin:20261031T091000,… / EXDATE;VALUE=DATE:20261031 / …Z → ISO wie im Store."""
+    head, _, vals = line.partition(":")
+    out = []
+    for v in vals.split(","):
+        v = v.strip()
+        try:
+            if "T" not in v:
+                out.append(dt.datetime.strptime(v, "%Y%m%d").date().isoformat())
+                continue
+            d = dt.datetime.strptime(v.rstrip("Z"), "%Y%m%dT%H%M%S")
+            if v.endswith("Z"):
+                d = d.replace(tzinfo=dt.timezone.utc)
+            out.append(st.iso(d))
+        except ValueError:
+            pass
+    return out
 
 
 def master(cal, gid):
     """Serie (Original-Termin) holen – für 'ganze Serie bearbeiten'."""
     g = call("GET", f"/calendars/{urllib.parse.quote(cal)}/events/{urllib.parse.quote(gid)}")
     ev = from_google(g, cal)
+    ev["exdates"] = []
     for line in g.get("recurrence", []):
         if line.startswith("RRULE:"):
             ev["rrule"] = line[6:]
-    ev["exdates"] = []
+        elif line.startswith("EXDATE"):                 # ausgelassene Termine nicht verlieren
+            ev["exdates"] += _exdates(line)
     return ev
 
 
@@ -362,6 +398,9 @@ def sync(pending, window):
                 if op.get("scope") == "instance":
                     body.pop("recurrence", None)
                 call("PATCH", f"/calendars/{cal}/events/{urllib.parse.quote(op['gid'])}", body=body)
+            elif op["op"] == "color":                     # nur die Farbe im Google-Kalender anpassen
+                call("PATCH", f"/calendars/{cal}/events/{urllib.parse.quote(op['gid'])}",
+                     body={"colorId": op["colorId"]})
             elif op["op"] == "delete":
                 try:
                     call("DELETE", f"/calendars/{cal}/events/{urllib.parse.quote(op['gid'])}")

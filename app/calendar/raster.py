@@ -122,3 +122,73 @@ def parse_time(text):
     if not (0 <= h <= 24 and 0 <= mi < 60):
         raise ValueError(f"Uhrzeit nicht erkannt: {text}")
     return dt.time(23, 59) if h == 24 else dt.time(h, mi)
+
+
+# ---------------------------------------------------------------- Semester (Vorlesungszeit)
+# Eigene Angaben stehen in ~/.config/kalender/semester.json (gehen vor), sonst grobe Schätzung:
+# [{"name": "WS 2026/27", "start": "2026-10-12", "end": "2027-02-06", "free": [["2026-12-20", "2027-01-03"], …]}]
+# 1. Woche („A“) = ungerade Kalenderwoche, 2. Woche („B“) = gerade – unabhängig vom Semester.
+import json as _json
+import os as _os
+
+SEMESTER_FILE = _os.path.expanduser("~/.config/kalender/semester.json")
+WEEKS = [("all", "jede woche"), ("a", "A · 1. woche (ungerade KW)"), ("b", "B · 2. woche (gerade KW)")]
+
+
+def _monday_on_after(d):
+    return d + dt.timedelta(days=(7 - d.weekday()) % 7)
+
+
+def _saturday_on_before(d):
+    return d - dt.timedelta(days=(d.weekday() - 5) % 7)
+
+
+def _guess(year):
+    """Übliche Lage der Vorlesungszeit, falls nichts eingetragen ist."""
+    ss = {"name": f"SS {year}", "start": _monday_on_after(dt.date(year, 4, 7)),
+          "end": _saturday_on_before(dt.date(year, 7, 19)), "free": [(dt.date(year, 5, 1), dt.date(year, 5, 1))],
+          "guess": True}
+    ws = {"name": f"WS {year}/{(year + 1) % 100:02d}", "start": _monday_on_after(dt.date(year, 10, 10)),
+          "end": _saturday_on_before(dt.date(year + 1, 2, 10)),
+          "free": [(dt.date(year, 12, 21), dt.date(year + 1, 1, 3))], "guess": True}
+    return [ss, ws]
+
+
+def semesters():
+    own = []
+    try:
+        with open(SEMESTER_FILE) as f:
+            for s in _json.load(f):
+                own.append({"name": s["name"], "start": dt.date.fromisoformat(s["start"]),
+                            "end": dt.date.fromisoformat(s["end"]),
+                            "free": [(dt.date.fromisoformat(a), dt.date.fromisoformat(b)) for a, b in s.get("free", [])]})
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    y = dt.date.today().year
+    out = list(own)
+    for g in [x for yy in range(y - 1, y + 3) for x in _guess(yy)]:
+        if not any(o["start"] <= g["end"] and g["start"] <= o["end"] for o in own):
+            out.append(g)
+    return sorted(out, key=lambda s: s["start"])
+
+
+def semester_for(d):
+    """Semester, dessen Vorlesungszeit d enthält – sonst das nächste."""
+    for s in semesters():
+        if d <= s["end"]:
+            return s
+    return None
+
+
+def semester_days(sem, weekday, week="all"):
+    """(alle Wochentage der Vorlesungszeit, davon die mit Veranstaltung) – ohne Pausen/Feiertage, ggf. nur A/B."""
+    d = sem["start"] + dt.timedelta(days=(weekday - sem["start"].weekday()) % 7)
+    every, hit = [], []
+    while d <= sem["end"]:
+        every.append(d)
+        free = any(a <= d <= b for a, b in sem["free"])
+        par = kw(d) % 2
+        if not free and (week == "all" or (week == "a" and par == 1) or (week == "b" and par == 0)):
+            hit.append(d)
+        d += dt.timedelta(weeks=1)
+    return every, hit

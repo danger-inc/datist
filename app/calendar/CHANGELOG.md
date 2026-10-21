@@ -1,5 +1,23 @@
 # datist – Änderungen
 
+## 1.4.0 (2026-10-21)
+- **Mehrtägige Termine**: im Termin neben dem Datum „bis“ eintragen (z. B. `fr`, `+2`, `23.10.`). Sie laufen als
+  Balken über die Tage der Woche (mehrere übereinander), im Monat mit „↦“ an den Folgetagen, in der Tagesansicht
+  mit „tag 2/3“. Termine über Mitternacht stehen jetzt auch am nächsten Morgen.
+- **Ganzes Semester**: Häkchen im Termin legt ihn 1× pro Woche über die ganze Vorlesungszeit an – ohne Feiertage
+  und Pausen, wahlweise nur **A-Woche** (1. Woche, ungerade KW) oder **B-Woche** (2. Woche, gerade KW), auch über
+  den Jahreswechsel mit KW 53 richtig. Die Semesterzeiten stehen unter konto → semester.
+- **Farben in Google Kalender**: Termine aus datist bekommen dort die passende Farbe statt Standard-Blau
+  (nächste der 11 Google-Farben). Ältere Termine werden beim nächsten Abgleich nachgezogen; „farben an google
+  übertragen“ im Konto gleicht alle neu ab.
+- **2 Finger zurück** (Wischen, Maustaste 8) – wie in den anderen Apps, endet immer in der Wochenansicht.
+- **2-Finger-Zoom**: zusammenziehen = Tag → Woche → Monat, auseinander = zurück.
+- **Konto & Einstellungen** sind jetzt ein eigenes Fenster: Knopf „konto“ oben rechts neben der Version
+  (`datist --tab acct` öffnet es weiterhin).
+- „ganze serie“ setzt den Editor nicht mehr zurück: Titel, Farbe, Ort, Notiz usw. bleiben, das Datum bleibt
+  beim angeklickten Termin. Nach dem Speichern springt die Ansicht nicht mehr zum Serienbeginn (eine Woche zurück).
+- Beim Bearbeiten einer Google-Serie gehen ausgelassene Einzeltermine nicht mehr verloren.
+
 ## 1.3.1 (2026-10-20)
 - `datist --tab acct` (bzw. day, week, month) öffnet direkt diesen Tab – scourge nutzt das für
   „einstellungen“.

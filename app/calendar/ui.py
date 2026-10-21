@@ -17,6 +17,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango, PangoCairo
 
 import tui
 from tui import label, hbox, vbox, esc
+import swipe
 import raster
 from raster import DS, TZ, WEEKDAYS, WEEKDAYS_LONG, MONTHS, CATS, CAT_NAMES, CAT_SHORT
 import rrule
@@ -91,6 +92,34 @@ def from_oklch(L, C, H):
             break
         C *= 0.9
     return tuple(_gam(x) for x in (r, g, b))
+
+
+# Die 11 Ereignisfarben von Google Kalender (colorId → Farbe)
+GOOGLE_COLORS = {"1": "#7986cb", "2": "#33b679", "3": "#8e24aa", "4": "#e67c73", "5": "#f6bf26", "6": "#f4511e",
+                 "7": "#039be5", "8": "#616161", "9": "#3f51b5", "10": "#0b8043", "11": "#d50000"}
+
+
+def _hex_rgb(h):
+    return tuple(int(h[i:i + 2], 16) / 255 for i in (1, 3, 5))
+
+
+_G_LCH = {k: to_oklch(_hex_rgb(v)) for k, v in GOOGLE_COLORS.items()}
+
+
+def google_color(rgb):
+    """Nächste Google-Farbe zu einer datist-Farbe (vor allem nach Farbton, graue Töne → Graphit)."""
+    L, C, H = to_oklch(rgb)
+    if C < 0.035:
+        return "8"
+    best, score = None, 9
+    for k, (l2, c2, h2) in _G_LCH.items():
+        if k == "8":
+            continue
+        dh = abs((H - h2 + 180) % 360 - 180) / 180
+        sc = dh + 0.35 * abs(L - l2) + 0.5 * abs(min(C, 0.2) - min(c2, 0.2))
+        if sc < score:
+            best, score = k, sc
+    return best
 
 
 class Palette:
@@ -363,7 +392,8 @@ class Editor(Gtk.Box):
                                            child=self.panel)
         self.append(self.scroller)
         b = self.panel.body
-        self.ev, self.orig, self.master = None, None, None
+        self.ev, self.orig, self.master, self.anchor = None, None, None, None
+        self.rep_ok = True
         self.cat_manual = False
 
         def row(name, *ws, wrap=False):
@@ -379,8 +409,11 @@ class Editor(Gtk.Box):
         row("typ", self.cat, hbox(label("farbe", "dim"), self.tone, spacing=6), self.cal, wrap=True)
         self.date = tui.Entry("Datum", width=14, activate=self.save)
         self.date.connect("changed", lambda *_: self.update_hint())
+        self.date_to = tui.Entry("bis: gleicher Tag", width=16, activate=self.save)
+        self.date_to.set_tooltip_text("mehrtägig: letzter Tag (z. B. fr, +2, 23.10.) – leer = gleicher Tag")
+        self.date_to.connect("changed", lambda *_: self.update_hint())
         self.date_hint = label("", "dim", ellipsize=True, hexpand=True)
-        row("datum", self.date, self.date_hint)
+        row("datum", self.date, hbox(label("bis", "dim"), self.date_to, spacing=6), self.date_hint, wrap=True)
         self.ds_btns = []
         dsbox = hbox(spacing=4)
         for n, a, e in DS:
@@ -410,6 +443,12 @@ class Editor(Gtk.Box):
                                 propagate_natural_height=True, child=self.notes, hexpand=True)
         nb.add_css_class("notes-box")
         row("notiz", nb)
+        self.sem = tui.Check("ganzes semester", False, self.on_sem,
+                             tooltip="1× pro Woche über die ganze Vorlesungszeit – ohne Feiertage und Pausen")
+        self.sem_week = tui.Select(self.on_sem_week, max_chars=28)
+        self.sem_week.set_options(raster.WEEKS, "all")
+        self.sem_plan = None
+        row("semester", self.sem, self.sem_week, wrap=True)
         self.rep = tui.Select(self.on_rep, max_chars=32)
         self.until = tui.Entry("bis (Datum)", width=12)
         self.until.connect("changed", lambda *_: self.update_hint())
@@ -440,6 +479,8 @@ class Editor(Gtk.Box):
         app = self.app
         self.orig = orig
         self.master = None
+        # Datum der angeklickten Instanz: bei „ganze serie“ wird die Serie relativ dazu verschoben
+        self.anchor = orig["s"].date() if orig and orig.get("s") else None
         new = ev is None
         if new:
             day = day or dt.date.today()
@@ -475,6 +516,10 @@ class Editor(Gtk.Box):
         if allday:
             e -= dt.timedelta(days=1)
         self.date.set_text(raster.fmt_date(s.date()))
+        last = e.date()
+        if not allday and e.time() == dt.time() and last == s.date() + dt.timedelta(days=1):
+            last = s.date()                       # bis 24:00 zählt noch als derselbe Tag
+        self.date_to.set_text(raster.fmt_date(last) if last > s.date() else "")
         self.t_from.set_text("" if allday else f"{s:%H:%M}")
         self.t_to.set_text("" if allday else f"{e:%H:%M}")
         self.allday.set_active(allday)
@@ -494,9 +539,11 @@ class Editor(Gtk.Box):
         self.custom.set_text(rule or "")
         self.custom_row.set_visible(pid == "custom")
         # Wiederholung nur bei neuen Terminen, lokalen Serien oder 'ganze Serie' änderbar
-        series_edit_ok = not ev.get("series")
-        self.rep.set_sensitive(series_edit_ok)
-        self.until.set_sensitive(series_edit_ok)
+        self.rep_ok = not ev.get("series")
+        sem = ev.get("sem") or {}
+        self.sem.set_active(bool(sem))
+        self.sem_week.set_options(raster.WEEKS, sem.get("week", "all"))
+        self.sem_sensitive()
         self.sync_ds()
         self.update_hint()
 
@@ -515,6 +562,21 @@ class Editor(Gtk.Box):
     def on_cal(self, v):
         self.cal.set_options(self.cal.options, v)
 
+    def sem_sensitive(self):
+        on = self.sem.active
+        self.sem.set_sensitive(self.rep_ok)
+        self.sem_week.set_sensitive(self.rep_ok and on)
+        for w in (self.rep, self.until, self.custom):
+            w.set_sensitive(self.rep_ok and not on)
+
+    def on_sem(self, on):
+        self.sem_sensitive()
+        self.update_hint()
+
+    def on_sem_week(self, v):
+        self.sem_week.set_options(self.sem_week.options, v)
+        self.update_hint()
+
     def on_allday(self, on):
         for w in (self.t_from, self.t_to, *self.ds_btns):
             w.set_sensitive(not on)
@@ -531,6 +593,26 @@ class Editor(Gtk.Box):
             return raster.parse_date(self.date.get_text())
         except ValueError:
             return None
+
+    def day_to(self):
+        """Letzter Tag (mehrtägig) oder None; relative Angaben (fr, +2) zählen ab dem Beginn."""
+        t = self.date_to.get_text().strip()
+        d = self.day()
+        if not t or d is None:
+            return None
+        try:
+            return raster.parse_date(t, d)
+        except ValueError:
+            raise ValueError(f"„bis“ nicht erkannt: {t}")
+
+    def eff_day(self):
+        """Beginn der Serie: bei „ganze serie“ zeigt das Datumsfeld die angeklickte Instanz –
+        die Serie verschiebt sich nur um das, was dort geändert wurde."""
+        d = self.day()
+        if d and self.scope == "series" and self.master and self.anchor:
+            ms = st.parse_when(self.master["start"], self.master.get("allday")).date()
+            return ms + (d - self.anchor)
+        return d
 
     def pick_ds(self, n, extend=False):
         a, e = raster.ds_times(n)
@@ -557,7 +639,19 @@ class Editor(Gtk.Box):
 
     def rule(self):
         """(rrule, start_date) aus den Feldern."""
-        d = self.day()
+        d = self.eff_day()
+        if self.sem.active and self.day():
+            show = self.day()
+            sem = raster.semester_for(show)
+            if not sem:
+                raise ValueError("kein Semester bekannt")
+            every, hit = raster.semester_days(sem, show.weekday(), self.sem_week.current or "all")
+            if not hit:
+                raise ValueError(f"kein passender Termin im {sem['name']}")
+            r = rrule.build({"FREQ": "WEEKLY", "BYDAY": rrule.DAYS[show.weekday()],
+                             "UNTIL": sem["end"].strftime("%Y%m%d") + "T225959Z"})
+            self.sem_plan = (sem, [x for x in every if x >= hit[0] and x not in hit], hit)
+            return r, hit[0]
         pid = self.rep.current
         if pid == "none" or d is None:
             return None, d
@@ -577,7 +671,16 @@ class Editor(Gtk.Box):
         d = self.day()
         if d:
             par = raster.parity(d)
-            self.date_hint.set_label(f"→ {WEEKDAYS_LONG[d.weekday()]}, {d.day}. {MONTHS[d.month - 1]} · KW {raster.kw(d)} {par}")
+            txt = f"→ {WEEKDAYS_LONG[d.weekday()]}, {d.day}. {MONTHS[d.month - 1]} · KW {raster.kw(d)} {par}"
+            try:
+                last = self.day_to()
+                if last and last > d:
+                    txt += f" · {(last - d).days + 1} Tage bis {raster.fmt_date(last, False)}"
+                elif last and last < d:
+                    txt += " · ✗ „bis“ liegt davor"
+            except ValueError as e:
+                txt += f" · ✗ {e}"
+            self.date_hint.set_label(txt)
         else:
             self.date_hint.set_label("→ ? (heute, morgen, mi, +3, 20.10.)")
         if self.ev and self.ev.get("series") and self.scope != "series":
@@ -585,9 +688,23 @@ class Editor(Gtk.Box):
             return
         try:
             r, start = self.rule()
+            if self.sem.active:
+                sem, ex, hit = self.sem_plan
+                wk = {"all": "jede Woche", "a": "A-Woche (ungerade KW)", "b": "B-Woche (gerade KW)"}
+                txt = (f"{sem['name']} · {WEEKDAYS[start.weekday()]} {wk.get(self.sem_week.current, '')} · "
+                       f"{raster.fmt_date(hit[0], False)}–{raster.fmt_date(hit[-1], False)} · {len(hit)} Termine")
+                if any(a <= x <= b for x in ex for a, b in sem["free"]):
+                    txt += " · ohne Feiertage/Pausen"
+                if sem.get("guess"):
+                    txt += " · Zeitraum geschätzt (eigene Daten: konto → semester)"
+                self.rep_hint.set_label("↻ " + txt)
+                return
             txt = rrule.describe(r, dt.datetime.combine(start, dt.time())) if r else "einmalig"
-            if r and start and d and start != d:
+            ed = self.eff_day()
+            if r and start and ed and start != ed:
                 txt += f" · beginnt {raster.fmt_date(start)} (passende KW)"
+            elif r and start and d and start != d:
+                txt += f" · Serie beginnt {raster.fmt_date(start)}"
             if r and "INTERVAL=2" in r and "WEEKLY" in r:
                 txt += " · Achtung: 2026 hat KW 53 – über den Jahreswechsel kippt die Parität, " \
                        "dafür „jede gerade/ungerade KW (exakt)“ wählen"
@@ -595,24 +712,55 @@ class Editor(Gtk.Box):
         except ValueError as e:
             self.rep_hint.set_label(f"✗ {e}")
 
+    def form(self):
+        """Was gerade im Editor steht – bleibt beim Umschalten nur dieser termin ↔ ganze serie erhalten."""
+        buf = self.notes.get_buffer()
+        return {"title": self.title.get_text(), "cat": self.cat.current, "cat_manual": self.cat_manual,
+                "tone": self.tone.current, "loc": self.loc.get_text(), "link": self.link.get_text(),
+                "notes": buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False),
+                "from": self.t_from.get_text(), "to": self.t_to.get_text(), "allday": self.allday.active,
+                "date": self.date.get_text(), "date_to": self.date_to.get_text()}
+
+    def restore(self, f):
+        self.title.set_text(f["title"])
+        self.cat_manual = f["cat_manual"]
+        self.cat.set_options(self.cat.options, f["cat"])
+        self.tone.set_options(self.tone.options, f["tone"] or "")
+        self.loc.set_text(f["loc"])
+        self.link.set_text(f["link"])
+        self.notes.get_buffer().set_text(f["notes"])
+        self.allday.set_active(f["allday"])
+        self.on_allday(f["allday"])
+        self.t_from.set_text(f["from"])
+        self.t_to.set_text(f["to"])
+        self.date.set_text(f["date"])
+        self.date_to.set_text(f["date_to"])
+        self.sync_ds()
+        self.update_hint()
+
     def set_scope(self, scope):
+        f = self.form()
         self.scope = scope
         self.scope_inst.set_active(scope == "instance")
         self.scope_series.set_active(scope == "series")
         if scope == "series":
-            self.load_master()
+            self.load_master(f)
         else:
             self.fill(self.ev)
+            self.restore(f)
 
-    def load_master(self):
+    def load_master(self, f):
         o = self.orig
-        if o.get("cal") == "local":
-            self.master = self.app.store.local.get(o["uid"])
+        if o.get("cal") == "local" or not o.get("series"):     # lokal oder noch nicht hochgeladen
+            self.master = self.app.store.find(o["uid"]) or self.ev
             self.fill({**self.master, "series": None})
+            self.restore(f)
             return
         self.msg.set_label("lade serie …")
 
         def done(res):
+            if self.scope != "series" or self.orig is not o:
+                return                                  # inzwischen umgeschaltet/geschlossen
             if isinstance(res, Exception):
                 self.msg.set_label(f"Serie nicht geladen (offline?): {res}")
                 self.set_scope("instance")
@@ -620,6 +768,7 @@ class Editor(Gtk.Box):
             self.master = res
             self.msg.set_label("")
             self.fill({**res, "series": None})
+            self.restore(f)
         tui.background(gcal.master, o["cal"], o["series"], done=done)
 
     def open_link(self):
@@ -655,6 +804,12 @@ class Editor(Gtk.Box):
         d = self.day()
         if d is None:
             raise ValueError("Datum nicht erkannt")
+        last = self.day_to()
+        span = (last - d).days if last else 0
+        if span < 0:
+            raise ValueError("„bis“ liegt vor dem Beginn")
+        d = self.eff_day()
+        ex_days = None
         ev = dict(self.master if self.scope == "series" and self.master else self.ev)
         ev["title"] = self.title.get_text().strip() or "(ohne Titel)"
         ev["cat"] = self.cat.current
@@ -669,18 +824,29 @@ class Editor(Gtk.Box):
             if r:
                 d = d2
             ev["rrule"] = r if r else ("" if ev.get("gid") and self.scope == "series" else None)
+            if self.sem.active and r:
+                sem, ex_days, _hit = self.sem_plan
+                ev["sem"] = {"name": sem["name"], "week": self.sem_week.current or "all"}
+            elif ev.get("sem"):                     # war Semester-Serie: deren Auslassungen gelten nicht mehr
+                ev["sem"] = None
+                ev["exdates"] = []
         if self.allday.active:
             ev["allday"] = True
             ev["start"] = d.isoformat()
-            ev["end"] = (d + dt.timedelta(days=1)).isoformat()
+            ev["end"] = (d + dt.timedelta(days=span + 1)).isoformat()
         else:
             a = raster.parse_time(self.t_from.get_text())
             e = raster.parse_time(self.t_to.get_text())
-            s, f = dt.datetime.combine(d, a), dt.datetime.combine(d, e)
+            s, f = dt.datetime.combine(d, a), dt.datetime.combine(d + dt.timedelta(days=span), e)
             if f <= s:
+                if span:
+                    raise ValueError("Ende liegt vor dem Beginn")
                 f += dt.timedelta(days=1) if e < a else dt.timedelta(minutes=90)
             ev["allday"] = False
             ev["start"], ev["end"] = st.iso(s), st.iso(f)
+        if ex_days is not None:
+            ev["exdates"] = [x.isoformat() if ev["allday"] else
+                             st.iso(dt.datetime.combine(x, st.parse_when(ev["start"], False).time())) for x in ex_days]
         return ev
 
     def save(self):
@@ -694,10 +860,12 @@ class Editor(Gtk.Box):
             ev["gid"] = self.master.get("gid")
             ev["uid"] = self.master.get("uid")
             ev["series"] = None
+        shown = self.day()            # dort bleiben, wo man den Termin sieht (Serie: nicht zum Serienbeginn)
         self.app.store.save_event(ev, scope=scope, original=self.orig)
         self.close()
         self.app.after_edit(f"gespeichert: {ev['title']}")
-        self.app.cursor = st.parse_when(ev["start"], ev.get("allday")).date()
+        if shown:
+            self.app.cursor = shown
         self.app.redraw()
 
     def delete(self):
@@ -735,8 +903,10 @@ class Kalender(Gtk.Application):
             self.build()
         getattr(tui.glass, "bring_here", lambda w: None)(self.win)
         self.win.present()
-        if tid in ("day", "week", "month", "acct"):
+        if tid in ("day", "week", "month"):
             self.win.show_tab(tid)
+        elif tid in ("acct", "konto", "settings"):
+            self.open_account()
 
     def do_activate(self):
         if self.win and self.win.get_visible() and self.win.is_active():
@@ -768,7 +938,7 @@ class Kalender(Gtk.Application):
         if CSS not in tui.CSS:          # im selben Stylesheet wie tui, damit @primary usw. auflösen
             tui.CSS += CSS
             tui.Theme.get().load()
-        tabs = [("day", "tag", "󰃭"), ("week", "woche", "󰸗"), ("month", "monat", "󰃰"), ("acct", "konto", "󰀄")]
+        tabs = [("day", "tag", "󰃭"), ("week", "woche", "󰸗"), ("month", "monat", "󰃰")]
         win = tui.TuiWindow(self, "datist", tabs, size=(1180, 780),
                             hints=(("hjkl", "nav"), ("n", "neu"), ("a", "schnell"), ("t", "heute"), ("?", "hilfe")))
         win.APP_ID = APP_ID
@@ -786,6 +956,14 @@ class Kalender(Gtk.Application):
         for w in (self.relogin_btn, self.sync_badge, self.prev_btn, self.today_btn, self.next_btn, self.kw_badge):
             win.header_extra.append(w)
         win.add_changelog("datist", os.path.dirname(os.path.realpath(__file__)))
+        # Konto & Einstellungen: eigenes Fenster, Knopf rechts neben der Version
+        self.acct_btn = tui.Button("󰀄 konto", self.open_account,
+                                   tooltip="konto & einstellungen – google, kalender, farben, semester")
+        win.header_extra.append(self.acct_btn)
+        self.acct_win = None
+        self._gpal = None
+        self._color_tried = set()
+        self.store.color_for = self.google_color_for
         self.header_compact = False
         win.on_resize = self.on_resize
         # Kopfleiste darf die Mindestbreite nicht bestimmen: in einen Container, der notfalls abschneidet,
@@ -814,10 +992,18 @@ class Kalender(Gtk.Application):
             c = Cells(self, v)
             self.views[v] = c
             win.add_page(v, c, scroll=False)
-        win.add_page("acct", self.build_account())
-        # Editor als Ebene über dem Inhalt
+        self.build_account()
+        # Editor als Ebene über dem Inhalt; darunter 2-Finger-Zurück (swipe.py, Seitenstapel) – endet in der Woche
         win.content.remove(win.stack)
-        self.overlay = Gtk.Overlay(child=win.stack, vexpand=True)
+        self.nav_back, self.nav_cur, self._nav_skip = [], None, False
+        self.swipe = swipe.SwipeBack(win.stack, self.nav_can_back, self.nav_go_back,
+                                     where=self.nav_where, target=self.nav_target)
+        self.overlay = Gtk.Overlay(child=self.swipe.widget, vexpand=True)
+        # 2-Finger-Zoom: zusammenziehen = Tag → Woche → Monat, auseinander = zurück
+        zoom = Gtk.GestureZoom()
+        zoom.connect("begin", lambda *_: setattr(self, "_zoom_done", False))
+        zoom.connect("scale-changed", self.on_zoom)
+        self.overlay.add_controller(zoom)
         self.editor = Editor(self)
         self.editor.set_visible(False)
         self.overlay.add_overlay(self.editor)
@@ -841,9 +1027,10 @@ class Kalender(Gtk.Application):
         keys.connect("key-pressed", self.on_key)
         win.add_controller(keys)
         win.on_tab = lambda tid: (self.store.settings.__setitem__("view", tid), self.store.save_settings(),
-                                  self.update_header(), self.focus_view(), tid == "acct" and self.refresh_account())
+                                  self.nav_note(tid), self.update_header(), self.focus_view())
         win.on_refresh = lambda: self.sync(force=True)
         win.theme.listeners.append(self.redraw)
+        win.theme.listeners.append(lambda: setattr(self, "_gpal", None))
         orig_key = win._key
 
         def key_guard(c, kv, code, state):
@@ -875,7 +1062,9 @@ class Kalender(Gtk.Application):
         win.add_controller(k2)
 
         view = self.store.settings.get("view", "week")
-        win.show_tab(view if view in ("day", "week", "month", "acct") else "week")
+        view = view if view in ("day", "week", "month") else "week"
+        self.nav_cur = view
+        win.show_tab(view)
         self.update_header()
         GLib.timeout_add_seconds(SYNC_EVERY, lambda: self.sync() or True)
         GLib.timeout_add_seconds(30, lambda: self.redraw() or True)      # Jetzt-Linie
@@ -913,6 +1102,107 @@ class Kalender(Gtk.Application):
         on = self.store.settings.get("see_through", True)
         for w in (self.editor, self.help):
             (w.add_css_class if on else w.remove_css_class)("see-through")
+
+    # ----- 2-Finger-Zurück: Tab-Verlauf, endet immer in der Wochenansicht -----
+    NAV_NAMES = {"day": "¹ tag", "week": "² woche", "month": "³ monat"}
+
+    def nav_where(self):
+        t = self.win.current_tab() if self.win else None
+        return t, self.NAV_NAMES.get(t, t or "")
+
+    def nav_note(self, tid):
+        skip, self._nav_skip = self._nav_skip, False
+        if tid == self.nav_cur:
+            return
+        if tid == "week":
+            self.nav_back = []                       # Woche ist das Ende der Zurück-Kette
+        elif not skip and self.nav_cur and (not self.nav_back or self.nav_back[-1] != self.nav_cur):
+            self.nav_back.append(self.nav_cur)
+            del self.nav_back[:-40]
+        self.nav_cur = tid
+
+    def nav_can_back(self):
+        return (self.win.current_tab() != "week" and not self.editor.get_visible()
+                and not self.help.get_visible())
+
+    def _nav_next(self, pop):
+        cur = self.win.current_tab()
+        stack = self.nav_back if pop else list(self.nav_back)
+        while stack:
+            t = stack.pop()
+            if t != cur:
+                return t
+        return "week"
+
+    def nav_target(self):
+        t = self._nav_next(False)
+        return t, self.NAV_NAMES.get(t, t)
+
+    def nav_go_back(self):
+        t = self._nav_next(True)
+        self._nav_skip = True
+        self.win.show_tab(t)
+
+    # ----- 2-Finger-Zoom -----
+    ZOOM_ORDER = ["day", "week", "month"]
+
+    def on_zoom(self, gesture, scale):
+        if getattr(self, "_zoom_done", False) or self.editor.get_visible() or self.help.get_visible():
+            return
+        if 0.8 <= scale <= 1.25:
+            return
+        cur = self.win.current_tab()
+        if cur not in self.ZOOM_ORDER:
+            return
+        i = self.ZOOM_ORDER.index(cur) + (1 if scale < 0.8 else -1)
+        self._zoom_done = True                       # pro Geste nur ein Schritt
+        if 0 <= i < len(self.ZOOM_ORDER):
+            self.focus_uid = None
+            self.win.show_tab(self.ZOOM_ORDER[i])
+
+    # ----- Google-Farben -----
+    def google_color_for(self, ev):
+        if self._gpal is None:
+            self._gpal = Palette()
+        return google_color(self._gpal.cat(ev.get("cat"), ev.get("tone")))
+
+    def push_colors(self):
+        n = len(self.store.color_fixes(all_events=True))
+        self.win.say(f"{n} termin{'e' if n != 1 else ''}/serie{'n' if n != 1 else ''} bekommen die datist-farbe in google"
+                     if n else "farben in google passen schon")
+        if n:
+            self.update_header()
+            GLib.timeout_add(500, lambda: self.sync(force=True) and False)
+
+    # ----- Konto-Fenster -----
+    def acct_open(self):
+        return bool(self.acct_win and self.acct_win.get_visible())
+
+    def open_account(self):
+        if self.acct_win is None:
+            w = Gtk.Window(title="datist · konto", transient_for=self.win, modal=False, hide_on_close=True)
+            w.add_css_class("pb-window")
+            w.add_css_class("tui")
+            w.set_default_size(*getattr(tui.glass, "fit_size", lambda a, b: (a, b))(760, 720))
+            getattr(tui.glass, "frame_window", lambda x: x.set_decorated(False))(w)
+            top = hbox(label("datist", "brand"), label("konto & einstellungen", "accent"), label("", hexpand=True),
+                       spacing=10)
+            top.add_css_class("topbar")
+            close = tui.Button("✕", w.close, tooltip="Schließen (Esc)")
+            close.add_css_class("close")
+            top.append(close)
+            scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True, child=self.acct)
+            scroll.set_margin_start(14)
+            scroll.set_margin_end(14)
+            scroll.set_margin_bottom(10)
+            w.set_child(vbox(Gtk.WindowHandle(child=top), scroll, spacing=0))
+            keys = Gtk.EventControllerKey()
+            keys.connect("key-pressed", lambda c, kv, *_: kv == Gdk.KEY_Escape and (w.close() or True))
+            w.add_controller(keys)
+            self.acct_win = w
+        self.refresh_account()
+        getattr(tui.glass, "bring_here", lambda x: None)(self.acct_win)
+        self.acct_win.present()
 
     def go_today(self):
         self.cursor = dt.date.today()
@@ -952,6 +1242,7 @@ class Kalender(Gtk.Application):
         elif self.win.compact is not None:
             self.win._apply_compact()
         self.today_btn.set_label("◉" if compact else "heute")
+        self.acct_btn.set_label("󰀄" if compact else "󰀄 konto")
         self.header_compact = compact
         self.editor.set_size_request(max(240, min(640, w - 20)), -1)
         self.editor.scroller.set_max_content_height(max(160, h - 110))
@@ -981,7 +1272,7 @@ class Kalender(Gtk.Application):
         for c in self.views.values():
             c.queue_draw()
         self.update_header()
-        if self.win.current_tab() == "acct":
+        if self.acct_open():
             self.refresh_account()
 
     def update_header(self):
@@ -1049,7 +1340,7 @@ class Kalender(Gtk.Application):
             if isinstance(res, gcal.ExpiredError):
                 self.win.say("Google-Anmeldung abgelaufen (Testmodus: alle 7 Tage) – oben auf „⚠ neu anmelden“ "
                              "klicken. Änderungen bleiben gespeichert.", error=True)
-                if self.win.current_tab() == "acct":
+                if self.acct_open():
                     self.refresh_account()
             elif isinstance(res, gcal.AuthError):
                 self.win.say(f"Google-Anmeldung: {res}", error=True)
@@ -1058,6 +1349,12 @@ class Kalender(Gtk.Application):
             else:
                 self.store.apply_sync(res)
                 self.last_errors = res.get("errors", [])
+                if not res.get("offline") and res.get("events") is not None:
+                    # ältere datist-Termine haben in Google noch keine Farbe (blau) → einmal nachziehen
+                    fixed = self.store.color_fixes(skip=self._color_tried)
+                    if fixed:
+                        self._color_tried.update(fixed)
+                        GLib.timeout_add(1500, lambda: self.sync() and False)
                 if res.get("offline"):
                     self.win.say("offline – Änderungen bleiben gespeichert und gehen später raus")
                 elif self.last_errors:
@@ -1094,6 +1391,26 @@ class Kalender(Gtk.Application):
     @staticmethod
     def clock(d):
         return f"{d:%H:%M}"
+
+    @staticmethod
+    def last_day(o):
+        """Letzter Tag, den ein Termin berührt (Ende exklusiv)."""
+        return max(o["s"].date(), (o["e"] - dt.timedelta(seconds=1)).date())
+
+    @staticmethod
+    def is_long(o):
+        """Ganztägig oder ≥ 20 h → in die Leiste über dem Raster statt ins DS-Raster."""
+        return bool(o.get("allday")) or (o["e"] - o["s"]) >= dt.timedelta(hours=20)
+
+    def span_text(self, o):
+        """„Fr 18:00 – So 14:00“ bzw. „Mi 21.10. – Fr 23.10.“ für mehrtägige Termine, sonst None."""
+        last = self.last_day(o)
+        if last <= o["s"].date():
+            return None
+        a, b = o["s"], o["e"]
+        if o.get("allday"):
+            return f"{WEEKDAYS[a.weekday()]} {a.day}.{a.month}. – {WEEKDAYS[last.weekday()]} {last.day}.{last.month}."
+        return f"{WEEKDAYS[a.weekday()]} {a:%H:%M} – {WEEKDAYS[b.weekday()]} {b:%H:%M}"
 
     # ----- Zeitachse: Zeilen für DS und Pausen -----
     def time_rows(self, k, early, late, extra=0, pauses=True):
@@ -1168,7 +1485,7 @@ class Kalender(Gtk.Application):
         lines = [title]
         if o.get("location"):
             lines.append("⌂ " + o["location"])
-        lines.append(f"{self.clock(o['s'])}–{self.clock(o['e'])}")
+        lines.append(self.span_text(o) or f"{self.clock(o['s'])}–{self.clock(o['e'])}")
         if o.get("link"):
             lines.append("󰂚 notist" if o["link"].startswith(st.NOTIST_LINK) else
                          "󰌹 " + re.sub(r"^https?://(www\.)?", "", o["link"]))
@@ -1219,11 +1536,29 @@ class Kalender(Gtk.Application):
         nd = len(days)
         a, b = days[0], days[-1] + dt.timedelta(days=1)
         occ = self.occ(a, b)
-        allday = [o for o in occ if o.get("allday") or (o["e"] - o["s"]) >= dt.timedelta(hours=20)]
-        timed = [o for o in occ if o not in allday]
-        early = any(o["s"].time() < dt.time(*DS[0][1]) for o in timed)
+        allday = [o for o in occ if self.is_long(o)]
+        timed = [o for o in occ if not self.is_long(o)]
+        early = any(o["s"].time() < dt.time(*DS[0][1]) or (o["s"].date() < o["e"].date() and o["e"].time() > dt.time())
+                    for o in timed)
         late = any(o["e"].time() > dt.time(*DS[-1][2]) or o["e"].date() > o["s"].date() for o in timed)
-        top = 2 + (1 if allday else 0)               # Rahmen-Titel + Tageszeile (+ ganztägig)
+        # ganztägige/mehrtägige Termine als Balken über die Tage, in Bahnen übereinander
+        bars, ends = [], []
+        for o in sorted(allday, key=lambda o: (o["s"], -(o["e"] - o["s"]).total_seconds())):
+            fi = max(0, (o["s"].date() - a).days)
+            li = min(nd - 1, (self.last_day(o) - a).days)
+            if fi > li:
+                continue
+            for lane, end in enumerate(ends):
+                if end < fi:
+                    ends[lane] = li
+                    break
+            else:
+                ends.append(li)
+                lane = len(ends) - 1
+            bars.append((o, fi, li, lane))
+        max_lanes = 3 if rows >= 30 else 2 if rows >= 22 else 1
+        n_lanes = min(len(ends), max_lanes)
+        top = 2 + n_lanes                            # Rahmen-Titel + Tageszeile (+ Balken)
         r0 = top + 1                                  # nach der Trennlinie
         avail = rows - r0 - 1                         # Zeilen für das Raster (unten der Rahmen)
         free = avail - (1 if early else 0) - (1 if late else 0)
@@ -1277,17 +1612,31 @@ class Kalender(Gtk.Application):
                 g.text(gut, 1, "‹", p.primary)
             if days[-1] < self.week_days()[-1]:
                 g.text(width - 2, 1, "›", p.primary)
-        if allday:
+        if bars:
             g.text(1, 2, "ganzt." if gut >= 8 else "gzt", p.fg, 0.5)
-            for i, d in enumerate(days):
-                c = gut + i * dw + 1
-                its = [o for o in allday if o["s"].date() <= d < max(o["e"].date(), o["s"].date() + dt.timedelta(days=1))]
-                if its:
-                    o = its[0]
-                    col = p.cat(o.get("cat"), o.get("tone"))
-                    g.fill(c, 2, dw - 1, 1, col, 0.25)
-                    g.text(c, 2, "▌" + o["title"] + (f" +{len(its) - 1}" if len(its) > 1 else ""), col, maxw=dw - 1)
-                    g.region(c, 2, dw - 1, 1, ("event", o))
+            hidden = [0] * nd
+            for o, fi, li, lane in bars:
+                if lane >= n_lanes:
+                    for i in range(fi, li + 1):
+                        hidden[i] += 1
+                    continue
+                c = gut + fi * dw + 1
+                w = (li - fi + 1) * dw - 1
+                rr = 2 + lane
+                col = p.cat(o.get("cat"), o.get("tone"))
+                sel = o["uid"] == self.focus_uid
+                g.fill(c, rr, w, 1, col, 0.4 if sel else 0.25)
+                cont_l = o["s"].date() < days[fi]
+                cont_r = self.last_day(o) > days[li]
+                t = ("◂" if cont_l else "▌") + ("" if o.get("allday") or cont_l else f"{o['s']:%H:%M} ") + o["title"]
+                g.text(c, rr, t, col, maxw=w - (1 if cont_r else 0))
+                if cont_r:
+                    g.text(c + w - 1, rr, "▸", col)
+                g.region(c, rr, w, 1, ("event", o))
+            for i, n in enumerate(hidden):
+                if n:
+                    lab = f"+{n}"
+                    g.text(gut + i * dw + dw - len(lab), 1 + n_lanes, lab, p.fg, 0.8, bg=(p.bg, 0.9))
         g.text(0, top, "├" + "─" * (width - 2) + "┤", p.primary, 0.35)
         # Scrollen, wenn das Raster nicht ganz passt: Cursor-DS bleibt sichtbar
         cur = next((s for s in segs if s[0] == "ds" and s[1] - 1 == self.slot), None)
@@ -1340,9 +1689,9 @@ class Kalender(Gtk.Application):
             g.text(gut + i * dw, rr, "▶", p.primary)
         day_a, day_b = raster.minutes(DS[0][1]), raster.minutes(DS[-1][2])
         for i, d in enumerate(days):
-            items = [o for o in timed if o["s"].date() == d]
+            items = [o for o in timed if o["s"].date() <= d <= self.last_day(o)]     # auch über Mitternacht
             for o, lane, nl in self.lanes(items):
-                sm = o["s"].hour * 60 + o["s"].minute
+                sm = o["s"].hour * 60 + o["s"].minute if o["s"].date() == d else 0
                 em = o["e"].hour * 60 + o["e"].minute if o["e"].date() == d else 24 * 60
                 if em <= day_a:
                     ra = self.row_at(segs, 0)
@@ -1382,11 +1731,16 @@ class Kalender(Gtk.Application):
         title = f"{WEEKDAYS_LONG[d.weekday()]}, {d.day}. {MONTHS[d.month - 1]} {d.year}"
         right = f"KW {raster.kw(d)} ◆ {'gerade' if even else 'ungerade'}"
         lines = []        # [(art, payload)]  – art: text/ds/pause/event
-        allday = [o for o in occ if o.get("allday") or (o["e"] - o["s"]) >= dt.timedelta(hours=20)]
-        timed = [o for o in occ if o not in allday]
+        allday = [o for o in occ if self.is_long(o)]
+        timed = [o for o in occ if not self.is_long(o)]
         for o in allday:
             lines.append(("allday", o))
-        early = [o for o in timed if o["e"].time() <= dt.time(*DS[0][1]) and o["s"].date() == d]
+        # Zeiten auf diesen Tag begrenzt (Termine über Mitternacht)
+        d0, d1 = dt.datetime.combine(d, dt.time()), dt.datetime.combine(d + dt.timedelta(days=1), dt.time())
+        cs = lambda o: max(o["s"], d0)
+        ce = lambda o: min(o["e"], d1)
+        at = lambda t: dt.datetime.combine(d, t)
+        early = [o for o in timed if ce(o) <= at(dt.time(*DS[0][1]))]
         if early:
             lines.append(("head", ("vor 07:30", None, None)))
             lines.extend(("event", o) for o in early)
@@ -1394,8 +1748,7 @@ class Kalender(Gtk.Application):
         for i, (n, a, b) in enumerate(DS):
             sa, sb = dt.time(*a), dt.time(*b)
             lines.append(("ds", (n, sa, sb)))
-            hits = [o for o in timed if o["s"].time() < sb and (o["e"].time() > sa or o["e"].date() > d)
-                    and o["uid"] + str(o["s"]) not in shown and o["s"].date() == d]
+            hits = [o for o in timed if cs(o) < at(sb) and ce(o) > at(sa) and o["uid"] + str(o["s"]) not in shown]
             for o in hits:
                 shown.add(o["uid"] + str(o["s"]))
                 lines.append(("event", o))
@@ -1403,8 +1756,8 @@ class Kalender(Gtk.Application):
                 lines.append(("free", n - 1))
             if i < len(DS) - 1:
                 pa, pb = sb, dt.time(*DS[i + 1][1])
-                ph = [o for o in timed if o["uid"] + str(o["s"]) not in shown and o["s"].time() < pb
-                      and o["e"].time() > pa]
+                ph = [o for o in timed if o["uid"] + str(o["s"]) not in shown and cs(o) < at(pb)
+                      and ce(o) > at(pa)]
                 lines.append(("pause", (pa, pb)))
                 for o in ph:
                     shown.add(o["uid"] + str(o["s"]))
@@ -1473,7 +1826,16 @@ class Kalender(Gtk.Application):
                 if vis:
                     col = p.cat(x.get("cat"), x.get("tone"))
                     g.fill(2, r, width - 4, 1, col, 0.22)
-                    g.text(2, r, f"▌ganztägig  {x['title']}", col, maxw=width - 4)
+                    rng = self.span_text(x)
+                    if rng:
+                        n_days = (self.last_day(x) - x["s"].date()).days + 1
+                        lab = f"tag {(d - x['s'].date()).days + 1}/{n_days} · {rng}"
+                    else:
+                        lab = "ganztägig" if x.get("allday") else f"{x['s']:%H:%M}–{x['e']:%H:%M}"
+                    sel = x["uid"] == self.focus_uid
+                    if sel:
+                        g.fill(2, r, width - 4, 1, col, 0.4)
+                    g.text(2, r, f"▌{lab}  {x['title']}", col, maxw=width - 4)
                     g.region(2, r, width - 4, 1, ("event", x))
             elif k == "event":
                 o = x
@@ -1490,7 +1852,7 @@ class Kalender(Gtk.Application):
                         ds_txt = (f"{span[0]}. DS" if span[0] == span[1] else f"{span[0]}.–{span[1]}. DS") if span else ""
                         g.box(c0, r, w, h if r + h < rows else rows - r, col, 1.0 if sel else 0.85,
                               title=f"{CAT_NAMES.get(o.get('cat'), '')} · {o['title']}",
-                              title_color=p.fg, right=f"{o['s']:%H:%M}–{o['e']:%H:%M} {ds_txt}")
+                              title_color=p.fg, right=self.span_text(o) or f"{o['s']:%H:%M}–{o['e']:%H:%M} {ds_txt}")
                     body = []
                     meta = []
                     head_len = len(f"{CAT_NAMES.get(o.get('cat'), '')} · {o['title']}") + 22
@@ -1606,7 +1968,10 @@ class Kalender(Gtk.Application):
                 show = evs[:room] if len(evs) <= room else evs[:room - 1]
                 for j, o in enumerate(show):
                     col = p.cat(o.get("cat"), o.get("tone"))
-                    t = ("" if o.get("allday") or cw < 12 else f"{o['s']:%H:%M} ") + o["title"]
+                    cont = o["s"].date() < d                     # mehrtägig: Folgetag
+                    t = ("↦ " if cont else "" if o.get("allday") or cw < 12 else f"{o['s']:%H:%M} ") + o["title"]
+                    if self.last_day(o) > o["s"].date():
+                        g.fill(c, body + 1 + j, cw, 1, col, 0.2 * al)
                     g.text(c, body + 1 + j, "▌", col, al)
                     g.text(c + 1, body + 1 + j, t, p.fg, 0.85 * al, maxw=cw - 1)
                     g.region(c, body + 1 + j, cw, 1, ("event", o))
@@ -1935,7 +2300,9 @@ class Kalender(Gtk.Application):
                 ("a", "Schnelleingabe:  V Mathe mi 2ds @MA/041 #v !u bis 5.2."),
                 ("⏎ / e", "markierten Termin bearbeiten"), ("tab", "nächster Termin des Tages"),
                 ("x x", "Termin löschen"), ("s / strg+r", "mit Google abgleichen"), ("+ −", "Schrift größer/kleiner"),
-                ("1–4", "Tabs"), ("esc", "schließen"),
+                ("1–3", "Tag / Woche / Monat"), ("esc", "schließen"),
+                ("2 finger ← / maus 8", "zurück (endet in der Woche)"),
+                ("2 finger zoom", "zusammen: Tag → Woche → Monat · auseinander: zurück"),
                 ("klick", "Termin öffnen · Wochentag → Tagesansicht · KW / Tageszahl im Monat → Woche / Tag"),
                 ("✓ 12:34 (oben)", "letzter Google-Abgleich – klicken = jetzt abgleichen")]
         quick = [("2ds  2-3ds  14-16", "Zeit: Doppelstunde(n) oder Uhrzeit"), ("mi  morgen  +3  20.10.", "Tag"),
@@ -1985,6 +2352,14 @@ class Kalender(Gtk.Application):
                                            self.apply_see_through()))
         self.v_panel.body.append(wrapbox(self.v_week, self.v_see, label("schrift: + / − in den ansichten", "dim")))
         self.acct.append(self.v_panel)
+        self.s_panel = tui.Panel("semester · vorlesungszeit")
+        self.s_list = vbox(spacing=2)
+        self.s_panel.body.append(self.s_list)
+        self.s_panel.body.append(wrapbox(
+            label("für „ganzes semester“ im termin – A = 1. woche (ungerade KW), B = 2. woche (gerade KW)", "dim"),
+            tui.Button("zeiten bearbeiten", self.edit_semesters,
+                       tooltip=f"öffnet {raster.SEMESTER_FILE.replace(os.path.expanduser('~'), '~')}")))
+        self.acct.append(self.s_panel)
         self.refresh_account()
         return self.acct
 
@@ -2038,6 +2413,9 @@ class Kalender(Gtk.Application):
                 self.g_steps.append(label("✗ " + e, "warn", wrap=True))
             self.g_btns.set_layout_manager(WrapLayout(spacing=8))
             self.g_btns.append(tui.Button("jetzt abgleichen", lambda: self.sync(force=True)))
+            self.g_btns.append(tui.Button("farben an google übertragen", self.push_colors,
+                                          tooltip="alle in datist angelegten Termine bekommen in Google die "
+                                                  "passende Farbe (nächste der 11 Google-Farben)"))
             self.g_btns.append(tui.Button("abmelden", self.logout, danger=True))
         else:
             self.g_status.set_markup("○ nicht angemeldet – alles läuft lokal (Kalender „Lokal“), "
@@ -2091,6 +2469,27 @@ class Kalender(Gtk.Application):
                     "freeBusyReader": "nur frei/belegt"}.get(c.get("role"), "")
             self.c_list.append(wrapbox(chk, label(role, "dim"), std, spacing=10))
         self.f_area.queue_draw()
+        tui.clear(self.s_list)
+        today = dt.date.today()
+        for sem in raster.semesters():
+            if sem["end"] < today - dt.timedelta(days=60) or sem["start"] > today + dt.timedelta(days=420):
+                continue
+            now = sem["start"] <= today <= sem["end"]
+            txt = (f"{sem['name']:<11} {raster.fmt_date(sem['start'])} – {raster.fmt_date(sem['end'])}"
+                   + (f" · {len(sem['free'])} pause{'n' if len(sem['free']) != 1 else ''}" if sem["free"] else ""))
+            self.s_list.append(hbox(label("●" if now else "○", "accent" if now else "dim"), label(txt),
+                                    label("geschätzt" if sem.get("guess") else "", "dim"), spacing=8))
+
+    def edit_semesters(self):
+        path = raster.SEMESTER_FILE
+        if not os.path.exists(path):          # Vorlage aus den (geschätzten) Zeiten anlegen
+            import json
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as f:
+                json.dump([{"name": s["name"], "start": s["start"].isoformat(), "end": s["end"].isoformat(),
+                            "free": [[a.isoformat(), b.isoformat()] for a, b in s["free"]]}
+                           for s in raster.semesters()], f, ensure_ascii=False, indent=1)
+        Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(path).get_uri(), None)
 
     def hex(self, name):
         c = tui.colors().get(name)
