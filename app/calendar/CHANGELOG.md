@@ -1,5 +1,16 @@
 # datist – Änderungen
 
+## 1.6.0 (2026-10-22)
+- **Wo stehe ich gerade? – Woche**: minutengenaue Jetzt-Linie mit Punkt in der heutigen Spalte (über den
+  Terminen, verdeckt nichts), dünn durch die anderen Tage, links die Uhrzeit als Marke; die heutige Spalte ist
+  leicht hinterlegt.
+- **Tag**: Linie „● jetzt 13:40“ genau zwischen den Terminen; der laufende Termin bekommt einen kräftigen Rahmen
+  mit „● läuft · bis …“, vergangene Termine werden blasser.
+- **Monat**: der heutige Tag hat einen farbigen Rahmen und die Uhrzeit neben der Tageszahl, schon vergangene
+  Termine des Tages sind blasser.
+- **Farbvorschau beim Termin anlegen**: Farben als Kacheln statt Liste – drüberfahren zeigt die Farbe sofort
+  in einer Vorschau (so sieht der Termin in Woche und Monat aus) samt der Farbe, die er in Google Kalender bekommt.
+
 ## 1.5.0 (2026-10-22)
 - **Termin wegklicken**: Ein Klick neben den Termin-Editor schließt ihn. Hast du etwas geändert, wird es dabei
   gespeichert (bei einer ungültigen Eingabe bleibt er offen und zeigt den Fehler); unverändert geht er einfach zu.

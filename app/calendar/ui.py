@@ -36,6 +36,8 @@ CSS = """
 .kw-badge.even { background-color: @primary; color: @on_primary; }
 .kw-badge.odd { background-color: @tertiary; color: @background; }
 .sync-badge { color: @secondary; margin-right: 6px; }
+.editor-card button.swatch { padding: 0; margin: 0; min-width: 0; min-height: 0; background: none;
+    border: none; box-shadow: none; }
 .editor-scrim { background-color: alpha(@background, 0.22); }
 .editor-card { background-color: alpha(@background, 0.97); border-radius: 6px; padding: 4px 6px 10px 6px; }
 .glass .editor-card { background-color: alpha(@background, 0.97); }
@@ -98,6 +100,10 @@ def from_oklch(L, C, H):
 # Die 11 Ereignisfarben von Google Kalender (colorId → Farbe)
 GOOGLE_COLORS = {"1": "#7986cb", "2": "#33b679", "3": "#8e24aa", "4": "#e67c73", "5": "#f6bf26", "6": "#f4511e",
                  "7": "#039be5", "8": "#616161", "9": "#3f51b5", "10": "#0b8043", "11": "#d50000"}
+
+
+GOOGLE_NAMES = {"1": "Lavendel", "2": "Salbei", "3": "Weintraube", "4": "Flamingo", "5": "Banane", "6": "Mandarine",
+                "7": "Pfau", "8": "Graphit", "9": "Heidelbeere", "10": "Basilikum", "11": "Tomate"}
 
 
 def _hex_rgb(h):
@@ -266,6 +272,18 @@ class Cells(Gtk.DrawingArea):
         self.text(c, r + h - 1, bl + hz * inner + br, color, alpha)
 
 
+    def hline(self, c, rf, w, color, alpha=1.0, width=2.0, dot=False):
+        """Feine Linie bei Zeile rf (Bruchteil erlaubt) über dem Text – z. B. die Jetzt-Linie."""
+        rf += self.off
+        if self.clip and not (self.clip[0] <= rf < self.clip[1]):
+            return
+        self.ops.append(("l", c, rf, w, color, alpha, width, dot))
+
+    def erase(self, c, r, w):
+        """Schon gesetzte Texte, die in Zeile r zwischen c und c+w beginnen, wieder entfernen (Überschreiben)."""
+        r += self.off
+        self.ops = [op for op in self.ops if not (op[0] == "t" and op[2] == r and c <= op[1] < c + w)]
+
     def region(self, c, r, w, h, payload):
         r += self.off
         if self.clip:
@@ -300,6 +318,18 @@ class Cells(Gtk.DrawingArea):
                 cr.set_source_rgba(*color, a)
                 cr.move_to(c * cw, r * ch)
                 PangoCairo.show_layout(cr, layout)
+        for op in self.ops:
+            if op[0] == "l":
+                _, c, rf, w, color, a, lw, dot = op
+                y = round(rf * ch) + (0.5 if lw % 2 else 0)
+                cr.set_source_rgba(*color, a)
+                cr.set_line_width(lw)
+                cr.move_to(c * cw, y)
+                cr.line_to((c + w) * cw, y)
+                cr.stroke()
+                if dot:
+                    cr.arc(c * cw, y, lw * 2.2, 0, 2 * math.pi)
+                    cr.fill()
 
     def _click(self, gesture, n, x, y):
         self.grab_focus()
@@ -381,6 +411,79 @@ def wrapbox(*children, spacing=8):
 # =====================================================================
 # Editor
 # =====================================================================
+class ToneSwatches(Gtk.Box):
+    """Farbwahl als Kacheln (gleiche Schnittstelle wie tui.Select: options, current, set_options).
+    Überfahren zeigt die Farbe sofort in der Vorschau des Editors (on_hover)."""
+    SIZE = 18
+
+    def __init__(self, app, callback, on_hover):
+        super().__init__(spacing=3, valign=Gtk.Align.CENTER)
+        self.app, self.callback, self.on_hover = app, callback, on_hover
+        self.options, self.current, self.hover = None, None, None
+        self.btns = {}
+        self.name = label("", "dim")
+        self.name.set_margin_start(6)
+
+    def cat_color(self, pal):
+        ed = self.app.editor if hasattr(self.app, "editor") else None
+        return pal.cat(ed.cat.current if ed else None)
+
+    def set_options(self, options, current):
+        if options != self.options:
+            self.options = list(options)
+            tui.clear(self)
+            self.btns = {}
+            for oid, text in self.options:
+                da = Gtk.DrawingArea(content_width=self.SIZE, content_height=self.SIZE)
+                da.set_draw_func(self._draw, oid)
+                b = Gtk.Button(child=da, tooltip_text=text, focus_on_click=False)
+                b.add_css_class("swatch")
+                b.connect("clicked", self._pick, oid)
+                mo = Gtk.EventControllerMotion()
+                mo.connect("enter", lambda *_a, o=oid: self._hover(o))
+                mo.connect("leave", lambda *_a: self._hover(None))
+                b.add_controller(mo)
+                self.append(b)
+                self.btns[oid] = da
+            self.append(self.name)
+        self.current = current
+        self.refresh()
+
+    def refresh(self):
+        for da in self.btns.values():
+            da.queue_draw()
+        oid = self.hover if self.hover is not None else self.current
+        self.name.set_label(next((t for o, t in self.options or [] if o == oid), ""))
+
+    def _hover(self, oid):
+        self.hover = oid
+        self.refresh()
+        self.on_hover()
+
+    def _pick(self, _b, oid):
+        if oid != self.current:
+            self.callback(oid)
+
+    def _draw(self, _da, cr, w, h, oid):
+        pal = Palette()
+        col = pal.tones.get(oid) if oid else self.cat_color(pal)
+        sel = oid == (self.current or "")
+        cr.set_line_width(1.5)
+        if sel or oid == self.hover:                   # Ring um die gewählte Farbe
+            cr.set_source_rgba(*pal.fg, 1.0 if sel else 0.5)
+            cr.rectangle(0.75, 0.75, w - 1.5, h - 1.5)
+            cr.stroke()
+        cr.set_source_rgb(*col)
+        if oid:
+            cr.rectangle(3.5, 3.5, w - 7, h - 7)
+            cr.fill()
+        else:                                          # „auto“: Rahmen in Typ-Farbe mit Punkt
+            cr.rectangle(4, 4, w - 8, h - 8)
+            cr.stroke()
+            cr.arc(w / 2, h / 2, 2, 0, 2 * math.pi)
+            cr.fill()
+
+
 class Editor(Gtk.Box):
     def __init__(self, app):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
@@ -405,9 +508,16 @@ class Editor(Gtk.Box):
         self.title.connect("changed", self.on_title)
         row("titel", self.title)
         self.cat = tui.Select(self.on_cat)
-        self.tone = tui.Select(self.on_tone, max_chars=14)
+        self.tone = ToneSwatches(app, self.on_tone, self.show_preview)
         self.cal = tui.Select(self.on_cal, max_chars=22)
-        row("typ", self.cat, hbox(label("farbe", "dim"), self.tone, spacing=6), self.cal, wrap=True)
+        row("typ", self.cat, self.cal, wrap=True)
+        row("farbe", self.tone)
+        # Vorschau: so erscheint der Termin in Woche / Monat (und welche Farbe Google bekommt)
+        self.preview = Cells(app, "preview")
+        self.preview.set_can_target(False)
+        self.preview.set_focusable(False)
+        self.preview.set_vexpand(False)
+        row("", self.preview)
         self.date = tui.Entry("Datum", width=14, activate=self.save)
         self.date.connect("changed", lambda *_: self.update_hint())
         self.date_to = tui.Entry("bis: gleicher Tag", width=16, activate=self.save)
@@ -431,7 +541,7 @@ class Editor(Gtk.Box):
         self.t_from = tui.Entry("von", width=6, activate=self.save)
         self.t_to = tui.Entry("bis", width=6, activate=self.save)
         for e in (self.t_from, self.t_to):
-            e.connect("changed", lambda *_: self.sync_ds())
+            e.connect("changed", lambda *_: (self.sync_ds(), self.preview.queue_draw()))
         self.allday = tui.Check("ganztägig", callback=lambda on: self.on_allday(on))
         row("zeit", hbox(self.t_from, label("–", "dim"), self.t_to, spacing=6), self.allday, wrap=True)
         self.loc = tui.Entry("Hörsaal, z. B. MA/041", activate=self.save)
@@ -518,6 +628,7 @@ class Editor(Gtk.Box):
         app = self.app
         self.title.set_text(ev.get("title", ""))
         self.cat.set_options([(k, f"{s} {n}") for k, n, s, _ in CATS], ev.get("cat") or raster.guess_cat(ev.get("title")))
+        self.tone.hover = None
         self.tone.set_options([("", "auto (typ)")] + TONES, ev.get("tone") or "")
         cals = app.store.writable()
         if ev.get("gid") or ev.get("uid", "").startswith("local-"):
@@ -558,18 +669,64 @@ class Editor(Gtk.Box):
         self.sem_sensitive()
         self.sync_ds()
         self.update_hint()
+        self.show_preview()
 
     # ----- Felder -----
+    def show_preview(self, *_):
+        cw, ch = self.preview.metrics()
+        self.preview.set_content_height(int(math.ceil(ch * 5)))
+        self.preview.queue_draw()
+        self.tone.refresh()
+
+    def preview_event(self):
+        """Termin aus den Feldern für die Vorschau (ohne Prüfungen, Lücken mit Standardwerten)."""
+        d = self.day() or dt.date.today()
+        try:
+            a = raster.parse_time(self.t_from.get_text())
+            e = raster.parse_time(self.t_to.get_text())
+        except ValueError:
+            a, e = raster.ds_times(1)
+        s, f = dt.datetime.combine(d, a), dt.datetime.combine(d, e)
+        if f <= s:
+            f = s + dt.timedelta(minutes=90)
+        tone = self.tone.hover if self.tone.hover is not None else self.tone.current
+        return {"uid": "preview", "title": self.title.get_text().strip() or "(ohne Titel)",
+                "cat": self.cat.current, "tone": tone or "", "location": self.loc.get_text().strip(),
+                "link": "", "s": s, "e": f, "allday": self.allday.active}
+
+    def render_preview(self, g, cols, rows):
+        app, p = self.app, self.app.pal
+        o = self.preview_event()
+        col = p.cat(o["cat"], o["tone"])
+        bw = min(cols, 26)
+        g.text(0, 0, "woche", p.fg, 0.45)
+        app.draw_event(g, dict(o, location=""), 0, 1, bw, 4)
+        x = bw + 2
+        if cols - x < 14:
+            return
+        w = cols - x
+        g.text(x, 0, "monat", p.fg, 0.45)
+        t = ("" if o["allday"] else f"{o['s']:%H:%M} ") + o["title"]
+        g.text(x, 1, "▌", col)
+        g.text(x + 1, 1, t, p.fg, 0.85, maxw=min(w, 22) - 1)
+        gid = google_color(col)
+        g.text(x, 3, "google", p.fg, 0.45)
+        g.text(x, 4, "■", _hex_rgb(GOOGLE_COLORS[gid]))
+        g.text(x + 2, 4, GOOGLE_NAMES[gid].lower(), p.fg, 0.75, maxw=w - 2)
+
     def on_title(self, *_):
         if not self.cat_manual:
             self.cat.set_options(self.cat.options, raster.guess_cat(self.title.get_text()))
+        self.show_preview()
 
     def on_cat(self, v):
         self.cat_manual = True
         self.cat.set_options(self.cat.options, v)
+        self.show_preview()
 
     def on_tone(self, v):
         self.tone.set_options(self.tone.options, v)
+        self.show_preview()
 
     def on_cal(self, v):
         self.cal.set_options(self.cal.options, v)
@@ -1421,7 +1578,9 @@ class Kalender(Gtk.Application):
     def render(self, view, g, cols, rows):
         p = self.pal
         g.fill(0, 0, cols, rows, p.bg, 0.0)
-        if view == "week":
+        if view == "preview":
+            self.editor.render_preview(g, cols, rows)
+        elif view == "week":
             self.render_week(g, cols, rows)
         elif view == "day":
             self.render_day(g, cols, rows)
@@ -1730,6 +1889,8 @@ class Kalender(Gtk.Application):
             rr, sh = r0 + cur[4], cur[5]
             g.fill(gut + i * dw + 1, rr, dw - 1, sh, p.primary, 0.09)
             g.text(gut + i * dw, rr, "▶", p.primary)
+        if today in days:                              # heutige Spalte leicht hinterlegt
+            g.fill(gut + days.index(today) * dw + 1, r0, dw - 1, grid_h, p.tones["alert"], 0.07)
         day_a, day_b = raster.minutes(DS[0][1]), raster.minutes(DS[-1][2])
         for i, d in enumerate(days):
             items = [o for o in timed if o["s"].date() <= d <= self.last_day(o)]     # auch über Mitternacht
@@ -1756,10 +1917,18 @@ class Kalender(Gtk.Application):
                 self.draw_event(g, o, c, top_r, w, h, sel)
         if today in days:
             i = days.index(today)
-            rr = r0 + int(self.row_at(segs, now.hour * 60 + now.minute))
+            rf = r0 + self.row_at(segs, now.hour * 60 + now.minute)
+            rr = int(rf)
             if r0 <= rr < r0 + grid_h:
-                g.text(0, rr, "▶", p.tones["alert"])
-                g.text(gut + i * dw + 1, rr, "━" * (dw - 1), p.tones["alert"], 0.75)
+                al = p.tones["alert"]
+                rf = min(rf, r0 + grid_h - 0.05)
+                g.hline(gut, rf, i * dw, al, 0.45, 1)          # übrige Tage: dünn
+                g.hline(gut + i * dw, rf, dw, al, 1.0, 2, dot=True)    # heute: kräftig mit Punkt
+                g.hline(gut + (i + 1) * dw, rf, (nd - i - 1) * dw, al, 0.45, 1)
+                g.erase(0, rr, gut)                    # Uhrzeit links statt DS-Beschriftung
+                lab = f"{now:%H:%M}" if gut >= 6 else "▶"
+                g.fill(0, rr, len(lab), 1, al, 1.0)
+                g.text(0, rr, lab, p.bg)
         g.off, g.clip = 0, None
         if self.week_overflow:                       # Scroll-Anzeige am rechten Rand
             pos = r0 + int(self.week_scroll / max(1, grid_h - avail) * (avail - 1))
@@ -1809,6 +1978,24 @@ class Kalender(Gtk.Application):
         if late:
             lines.append(("head", ("nach 20:00", None, None)))
             lines.extend(("event", o) for o in late)
+        now = dt.datetime.now()
+        if d == now.date():                           # „jetzt“-Linie an die passende Stelle
+            hm = lambda t: t.hour * 60 + t.minute
+            def when(k, x):
+                if k == "allday":
+                    return -1
+                if k == "ds":
+                    return hm(x[1])
+                if k == "free":
+                    return raster.minutes(DS[x][1])
+                if k == "pause":
+                    return hm(x[0])
+                if k == "event":
+                    return hm(cs(x).time()) if cs(x).date() == d else 0
+                return 0 if x[0].startswith("vor") else raster.minutes(DS[-1][2])
+            nm = hm(now.time())
+            at_i = next((i for i, (k, x) in enumerate(lines) if when(k, x) > nm), len(lines))
+            lines.insert(at_i, ("now", now))
         # Höhe je Zeile
         def height(kind, x):
             if kind == "event":
@@ -1831,7 +2018,6 @@ class Kalender(Gtk.Application):
         g.box(0, 0, width, rows, p.primary, 0.55, title=title, rounded=True, right=right,
               title_color=p.primary if d == dt.date.today() else p.fg)
         r = 1 - self.day_scroll
-        now = dt.datetime.now()
         for k, x in lines:
             h = height(k, x)
             if r + h <= 1:
@@ -1854,6 +2040,13 @@ class Kalender(Gtk.Application):
                     if active:
                         g.text(width - 9, r, " jetzt ", p.tones["alert"])
                     g.region(1, r, width - 2, 1, ("slot", d, n - 1))
+            elif k == "now":
+                if vis:
+                    al = p.tones["alert"]
+                    lab = f"━━ ● jetzt {x:%H:%M} "
+                    g.fill(1, r, width - 2, 1, al, 0.16)
+                    g.text(1, r, lab, al)
+                    g.text(1 + len(lab), r, "━" * max(0, width - 3 - len(lab)), al, 0.8)
             elif k == "pause":
                 pa, pb = x
                 if vis:
@@ -1888,14 +2081,21 @@ class Kalender(Gtk.Application):
                 hh = min(r + h, rows - 1) - top
                 if hh > 0:
                     sel = o["uid"] == self.focus_uid
-                    g.fill(c0, top, w, hh, col, 0.3 if sel else 0.13)
+                    past = o["e"] <= now
+                    running = o["s"] <= now < o["e"]
+                    fade = 0.5 if past and not sel else 1.0
+                    g.fill(c0, top, w, hh, col, 0.3 if sel else 0.2 if running else 0.13 * fade)
                     g.region(c0, top, w, hh, ("event", o))
                     if r >= 1:
                         span = raster.ds_span(o["s"].time(), o["e"].time())
                         ds_txt = (f"{span[0]}. DS" if span[0] == span[1] else f"{span[0]}.–{span[1]}. DS") if span else ""
-                        g.box(c0, r, w, h if r + h < rows else rows - r, col, 1.0 if sel else 0.85,
+                        right = self.span_text(o) or f"{o['s']:%H:%M}–{o['e']:%H:%M} {ds_txt}"
+                        if running:
+                            right = f"● läuft · bis {o['e']:%H:%M}"
+                        g.box(c0, r, w, h if r + h < rows else rows - r, p.tones["alert"] if running else col,
+                              1.0 if sel or running else 0.85 * fade,
                               title=f"{CAT_NAMES.get(o.get('cat'), '')} · {o['title']}",
-                              title_color=p.fg, right=self.span_text(o) or f"{o['s']:%H:%M}–{o['e']:%H:%M} {ds_txt}")
+                              title_color=p.fg if fade == 1.0 else col, right=right, heavy=running)
                     body = []
                     meta = []
                     head_len = len(f"{CAT_NAMES.get(o.get('cat'), '')} · {o['title']}") + 22
@@ -1918,7 +2118,7 @@ class Kalender(Gtk.Application):
                     for i, (txt, cc) in enumerate(body):
                         rr = r + 1 + i
                         if 1 <= rr < min(r + h - 1, rows - 1):
-                            g.text(c0 + 2, rr, txt, cc, 0.9, maxw=w - 4)
+                            g.text(c0 + 2, rr, txt, cc, 0.9 * fade, maxw=w - 4)
             r += h
         if total > avail:
             frac = self.day_scroll / max(1, total - avail)
@@ -1954,6 +2154,7 @@ class Kalender(Gtk.Application):
             g.text(kwc + i * dw + 1 + (1 if dw >= 5 else 0), 1, lab, p.fg, 0.5 if i >= 5 else 0.85, maxw=dw - 1)
         g.text(1, 1, "KW", p.fg, 0.5)
         today = dt.date.today()
+        now = dt.datetime.now()
         maxn = max([len(v) for v in by_day.values()] + [1])
         for w in range(weeks):
             r = 2 + w * hh
@@ -1989,8 +2190,17 @@ class Kalender(Gtk.Application):
                 num = f"{d.day:>2}"
                 nx = c + (1 if cw >= 4 else 0)
                 if d == today:
+                    sig = p.tones["alert"]
+                    g.fill(c, body, cw, bh, sig, 0.09)
                     g.fill(nx, body, 2, 1, p.primary, 1.0)
                     g.text(nx, body, num, p.on_primary)
+                    for rr in range(body, body + bh):    # Rahmen links/rechts in Signalfarbe
+                        g.erase(c - 1, rr, 1)
+                        g.erase(c + cw, rr, 1)
+                        g.text(c - 1, rr, "┃", sig)
+                        g.text(c + cw, rr, "┃", sig)
+                    if cw >= 13:
+                        g.text(nx + 3, body, f"{now:%H:%M}", sig)
                 else:
                     g.text(nx, body, num, p.fg, al * (0.6 if d.weekday() >= 5 else 1.0))
                 evs = by_day.get(d, [])
@@ -2011,12 +2221,13 @@ class Kalender(Gtk.Application):
                 show = evs[:room] if len(evs) <= room else evs[:room - 1]
                 for j, o in enumerate(show):
                     col = p.cat(o.get("cat"), o.get("tone"))
+                    ea = 0.45 if d == today and o["e"] <= now else al
                     cont = o["s"].date() < d                     # mehrtägig: Folgetag
                     t = ("↦ " if cont else "" if o.get("allday") or cw < 12 else f"{o['s']:%H:%M} ") + o["title"]
                     if self.last_day(o) > o["s"].date():
-                        g.fill(c, body + 1 + j, cw, 1, col, 0.2 * al)
-                    g.text(c, body + 1 + j, "▌", col, al)
-                    g.text(c + 1, body + 1 + j, t, p.fg, 0.85 * al, maxw=cw - 1)
+                        g.fill(c, body + 1 + j, cw, 1, col, 0.2 * ea)
+                    g.text(c, body + 1 + j, "▌", col, ea)
+                    g.text(c + 1, body + 1 + j, t, p.fg, 0.85 * ea, maxw=cw - 1)
                     g.region(c, body + 1 + j, cw, 1, ("event", o))
                 if len(evs) > room and room >= 2:
                     g.text(c + 1, body + room, f"+{len(evs) - len(show)} weitere", p.fg, 0.5 * al, maxw=cw - 1)
