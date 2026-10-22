@@ -1,5 +1,11 @@
 # datist – Änderungen
 
+## 1.5.0 (2026-10-22)
+- **Termin wegklicken**: Ein Klick neben den Termin-Editor schließt ihn. Hast du etwas geändert, wird es dabei
+  gespeichert (bei einer ungültigen Eingabe bleibt er offen und zeigt den Fehler); unverändert geht er einfach zu.
+  Esc bzw. „abbrechen“ verwirft wie bisher.
+- **2-Finger-Zurück** (und Maustaste „zurück“) funktioniert jetzt auch über dem Editor und der Hilfe und schließt sie.
+
 ## 1.4.0 (2026-10-21)
 - **Mehrtägige Termine**: im Termin neben dem Datum „bis“ eintragen (z. B. `fr`, `+2`, `23.10.`). Sie laufen als
   Balken über die Tage der Woche (mehrere übereinander), im Monat mit „↦“ an den Folgetagen, in der Tagesansicht

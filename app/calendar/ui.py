@@ -36,6 +36,7 @@ CSS = """
 .kw-badge.even { background-color: @primary; color: @on_primary; }
 .kw-badge.odd { background-color: @tertiary; color: @background; }
 .sync-badge { color: @secondary; margin-right: 6px; }
+.editor-scrim { background-color: alpha(@background, 0.22); }
 .editor-card { background-color: alpha(@background, 0.97); border-radius: 6px; padding: 4px 6px 10px 6px; }
 .glass .editor-card { background-color: alpha(@background, 0.97); }
 /* durchsichtige Fenster in der App (Konto → darstellung): Inhalt dahinter weichgezeichnet */
@@ -500,7 +501,18 @@ class Editor(Gtk.Box):
         self.scope_series.set_active(False)
         self.msg.set_label("")
         self.set_visible(True)
+        self.opened = self.form()
         GLib.idle_add(lambda: (self.title.grab_focus(), self.title.set_position(-1)) and False)
+
+    def dismiss(self):
+        """Wegklicken: unverändert → einfach zu; geändert → speichern (bei Fehler bleibt er offen)."""
+        now, was = self.form(), dict(getattr(self, "opened", None) or {})
+        now.pop("cat_manual", None)
+        was.pop("cat_manual", None)
+        if now == was or not now["title"].strip() and not was.get("title", "").strip():
+            self.close()
+        else:
+            self.save()
 
     def fill(self, ev):
         app = self.app
@@ -994,24 +1006,35 @@ class Kalender(Gtk.Application):
             win.add_page(v, c, scroll=False)
         self.build_account()
         # Editor als Ebene über dem Inhalt; darunter 2-Finger-Zurück (swipe.py, Seitenstapel) – endet in der Woche
+        # Das Wischen umfasst auch Editor und Hilfe: über einem offenen Termin schließt 2-Finger-Zurück ihn
         win.content.remove(win.stack)
         self.nav_back, self.nav_cur, self._nav_skip = [], None, False
-        self.swipe = swipe.SwipeBack(win.stack, self.nav_can_back, self.nav_go_back,
-                                     where=self.nav_where, target=self.nav_target)
-        self.overlay = Gtk.Overlay(child=self.swipe.widget, vexpand=True)
+        self.overlay = Gtk.Overlay(child=win.stack, vexpand=True)
         # 2-Finger-Zoom: zusammenziehen = Tag → Woche → Monat, auseinander = zurück
         zoom = Gtk.GestureZoom()
         zoom.connect("begin", lambda *_: setattr(self, "_zoom_done", False))
         zoom.connect("scale-changed", self.on_zoom)
         self.overlay.add_controller(zoom)
+        # Fläche hinter dem Editor: Klick daneben schließt ihn („wegklicken“)
+        self.scrim = Gtk.Box(hexpand=True, vexpand=True, visible=False)
+        self.scrim.add_css_class("editor-scrim")
+        sclick = Gtk.GestureClick(button=1)
+        sclick.connect("released", lambda g, *_: (g.set_state(Gtk.EventSequenceState.CLAIMED),
+                                                   GLib.idle_add(lambda: (self.dismiss_overlays(), False)[1])))
+        self.scrim.add_controller(sclick)
+        self.overlay.add_overlay(self.scrim)
         self.editor = Editor(self)
         self.editor.set_visible(False)
+        self.editor.connect("notify::visible", lambda *_: self.sync_scrim())
         self.overlay.add_overlay(self.editor)
         self.help = self.build_help()
         self.help.set_visible(False)
+        self.help.connect("notify::visible", lambda *_: self.sync_scrim())
         self.overlay.add_overlay(self.help)
         self.apply_see_through()
-        win.content.append(self.overlay)
+        self.swipe = swipe.SwipeBack(self.overlay, self.nav_can_back, self.nav_go_back,
+                                     where=self.nav_where, target=self.nav_target)
+        win.content.append(self.swipe.widget)
         # Schnelleingabe
         self.quick = tui.Entry("schnell: V Mathe mi 2ds @MA/041 #v !u bis 5.2.   (esc abbrechen)",
                                activate=self.quick_add)
@@ -1107,8 +1130,23 @@ class Kalender(Gtk.Application):
     NAV_NAMES = {"day": "¹ tag", "week": "² woche", "month": "³ monat"}
 
     def nav_where(self):
+        if getattr(self, "editor", None) and self.editor.get_visible():
+            return "editor", "termin"
+        if getattr(self, "help", None) and self.help.get_visible():
+            return "help", "hilfe"
         t = self.win.current_tab() if self.win else None
         return t, self.NAV_NAMES.get(t, t or "")
+
+    def sync_scrim(self):
+        self.scrim.set_visible(self.editor.get_visible() or self.help.get_visible())
+
+    def dismiss_overlays(self):
+        """Wegklicken / 2-Finger-Zurück über Editor oder Hilfe."""
+        if self.editor.get_visible():
+            self.editor.dismiss()
+        elif self.help.get_visible():
+            self.help.set_visible(False)
+            self.focus_view()
 
     def nav_note(self, tid):
         skip, self._nav_skip = self._nav_skip, False
@@ -1122,8 +1160,7 @@ class Kalender(Gtk.Application):
         self.nav_cur = tid
 
     def nav_can_back(self):
-        return (self.win.current_tab() != "week" and not self.editor.get_visible()
-                and not self.help.get_visible())
+        return self.editor.get_visible() or self.help.get_visible() or self.win.current_tab() != "week"
 
     def _nav_next(self, pop):
         cur = self.win.current_tab()
@@ -1135,10 +1172,16 @@ class Kalender(Gtk.Application):
         return "week"
 
     def nav_target(self):
+        if self.editor.get_visible() or self.help.get_visible():
+            t = self.win.current_tab()                # zurück = Editor/Hilfe zu, Ansicht bleibt
+            return t, self.NAV_NAMES.get(t, t)
         t = self._nav_next(False)
         return t, self.NAV_NAMES.get(t, t)
 
     def nav_go_back(self):
+        if self.editor.get_visible() or self.help.get_visible():
+            self.dismiss_overlays()
+            return
         t = self._nav_next(True)
         self._nav_skip = True
         self.win.show_tab(t)
