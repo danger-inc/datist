@@ -1,62 +1,62 @@
 # datist
 
-Kalender im Terminal-Look der Suite (GTK4): Wochen- und Monatsansicht mit dem Stundenraster der TU Berlin
-(Doppelstunden, Kalenderwochen gerade/ungerade), Kategorien, Wiederholungen, Offline-Speicher und Abgleich mit
-Google Kalender.
+calendar in the terminal look of the suite (gtk4): week and month view with the TU Berlin hour grid
+(double periods, even/odd calendar weeks), categories, repeating events, multi-day events, offline storage and
+sync with google calendar.
 
-## Installieren – Linux
+## install – linux
 
 ```bash
-gh auth login                                   # einmalig (Repo ist privat, Einladung nötig)
-gh repo clone invincible-nix/datist ~/datist-src
+gh auth login                                   # login once (repository is private, invitation needed)
+gh repo clone danger-inc/datist ~/datist-src
 cd ~/datist-src && ./install.sh
 ```
 
-Der Installer fragt nach den Systempaketen (GTK4, PyGObject – einmal Passwort), kopiert datist nach
-`~/.local/share/rice-apps/calendar` und legt den Befehl `datist` und einen Menüeintrag an. Die Symbole bringt
-datist selbst mit, eine Nerd Font ist nicht nötig.
+the installer asks for the system packages (gtk4, pygobject – password once), copies datist to
+`~/.local/share/rice-apps/calendar` and creates the command `datist` and a menu entry. the icons are bundled,
+no nerd font needed.
 
-Starten mit `datist` (oder aus dem Menü). Nochmal aufrufen blendet das Fenster ein/aus.
-Hyprland: `hl.bind("SUPER + K", hl.dsp.exec_cmd("datist"))` bzw. `bind = SUPER, K, exec, datist`.
+start with `datist` (or from the menu). calling it again shows/hides the window.
+hyprland: `hl.bind("SUPER + K", hl.dsp.exec_cmd("datist"))` or `bind = SUPER, K, exec, datist`.
 
-## Installieren – Windows 10/11
+## install – windows 10/11
 
-1. Repo herunterladen: auf GitHub **Code → Download ZIP** und entpacken (oder `gh repo clone …`).
-2. Im Ordner **`install-windows.bat`** doppelklicken.
+1. download the repo (on github **code → download zip** and extract, or `gh repo clone …`).
+2. double-click **`install-windows.bat`** in the folder.
 
-Das Skript richtet einmalig **MSYS2** ein (liefert GTK 4 und Python für Windows, ~1 GB, fragt nach
-Admin-Rechten), installiert die Pakete und legt datist ins Startmenü. Entfernen: `uninstall-windows.bat`.
-Unter Windows beendet ✕ datist ganz (unter Linux läuft es im Hintergrund weiter).
+the script sets up **msys2** once (provides gtk 4 and python for windows, ~1 gb, asks for admin rights),
+installs the packages and adds datist to the start menu. removal: `uninstall-windows.bat`.
+on windows ✕ exits datist (on linux it keeps running in the background).
 
-## Läuft auf
+## runs on
 
-| System | Status |
-|---|---|
-| Ubuntu 24.04+, Linux Mint 22+, Debian 13 | getestet (Ubuntu 24.04) |
-| Fedora 39+ | getestet (Fedora 44) |
-| Arch, EndeavourOS, CachyOS, Manjaro | getestet (Arch) |
-| openSUSE Tumbleweed | sollte gehen (ungetestet) |
-| Windows 10/11 | über MSYS2 – App-Start getestet, Installer auf echtem Windows noch ungetestet |
+| system | status |
+| --- | --- |
+| ubuntu 24.04+, linux mint 22+, debian 13 | tested (ubuntu 24.04) |
+| fedora 39+ | tested (fedora 44) |
+| arch, endeavouros, cachyos, manjaro | tested (arch) |
+| openSUSE Tumbleweed | should work (untested) |
+| windows 10/11 | via msys2 – app start tested, installer on real windows still untested |
 
-Nötig ist **GTK 4.12 oder neuer** (Ubuntu 22.04 / Mint 21 / Debian 12 sind zu alt).
-Auf GNOME, KDE und Windows hat das Fenster einen normalen Rahmen (verschieben über die Kopfzeile, Größe am Rand
-ziehen); auf Hyprland/Sway & Co. ist es rahmenlos.
+required is **gtk 4.12 or newer** (ubuntu 22.04 / mint 21 / debian 12 are too old).
+on gnome, kde and windows the window has a normal frame (move it by the header, resize at the edge);
+on hyprland/sway & co. it is borderless.
 
-## Google-Abgleich
+## google sync
 
-Unter „konto“ in der App. Google verlangt einen eigenen OAuth-Client (Typ „Desktop-App“); die App führt Schritt
-für Schritt durch. Anmeldung und Termine bleiben auf deinem Rechner (`~/.local/share/kalender`,
-`~/.config/kalender`). Optional: deine Google-Adresse in `~/.config/kalender/login_hint` – dann schlägt Google
-beim Anmelden gleich das richtige Konto vor.
+under "konto" in the app. google requires your own oauth client (type "desktop app"); the app walks you through it
+step by step. login and events stay on your machine (`~/.local/share/kalender`,
+`~/.config/kalender`). optional: put your google address into `~/.config/kalender/login_hint` – then google
+suggests the right account right away when you sign in.
 
-## Aktualisieren / entfernen
+## update / remove
 
-- Linux: `./update.sh` · `./uninstall.sh` (deine Termine bleiben)
-- Windows: neue Version holen und `install-windows.bat` erneut starten · `uninstall-windows.bat`
+* linux: `./update.sh` · `./uninstall.sh` (your events stay)
+* windows: get the new version and run `install-windows.bat` again · `uninstall-windows.bat`
 
-## Probleme?
+## problems?
 
-- **Kästchen statt Symbolen:** neu installieren bzw. `./update.sh` – die Symbolschrift kommt mit.
-- **`datist: Befehl nicht gefunden`:** `~/.local/bin` fehlt im PATH (der Installer zeigt, was in die `~/.bashrc`
-  gehört). Aus dem Anwendungsmenü startet es auch so.
-- **„GTK … ZU ALT“ beim Installieren:** die Distribution ist zu alt, siehe „Läuft auf“.
+* **boxes instead of symbols:** install again or `./update.sh` – the icon font comes along.
+* **`datist: command not found`:** `~/.local/bin` is missing in `PATH` (the installer shows what belongs in
+`~/.bashrc`). from the application menu it starts anyway.
+* **"GTK … ZU ALT" during install:** your distribution is too old, see "runs on".
