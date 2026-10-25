@@ -1,5 +1,10 @@
 # datist – Änderungen
 
+## 1.6.2 (2026-10-25)
+- **Windows**: Speichern brach bei Zeichen wie „☑“ mit einem Zeichensatz-Fehler ab; Textdateien werden dort jetzt
+  immer als UTF-8 gelesen und geschrieben.
+- **Windows**: Der Glas-Schalter funktioniert wieder.
+
 ## 1.6.1 (2026-10-25)
 - **Update-Knopf**: Neben der Versionsnummer steht „󰑐“ – Klick sucht sofort nach einem Update. Gibt es eine neuere
   Version, wird daraus „󰚰 update“; ein Klick lädt und installiert sie (Linux und Windows), danach heißt er „󰑓 neu starten“.
