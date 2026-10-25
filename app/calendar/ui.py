@@ -1190,7 +1190,8 @@ class Kalender(Gtk.Application):
         self.overlay.add_overlay(self.help)
         self.apply_see_through()
         self.swipe = swipe.SwipeBack(self.overlay, self.nav_can_back, self.nav_go_back,
-                                     where=self.nav_where, target=self.nav_target)
+                                     where=self.nav_where, target=self.nav_target,
+                                     goto=self.nav_goto)
         win.content.append(self.swipe.widget)
         # Schnelleingabe
         self.quick = tui.Entry("schnell: V Mathe mi 2ds @MA/041 #v !u bis 5.2.   (esc abbrechen)",
@@ -1334,6 +1335,12 @@ class Kalender(Gtk.Application):
             return t, self.NAV_NAMES.get(t, t)
         t = self._nav_next(False)
         return t, self.NAV_NAMES.get(t, t)
+
+    def nav_goto(self, t):
+        if t in ("editor", "help") or not t:
+            return False
+        self.win.show_tab(t)
+        return True
 
     def nav_go_back(self):
         if self.editor.get_visible() or self.help.get_visible():

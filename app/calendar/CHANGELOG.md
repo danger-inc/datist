@@ -1,5 +1,15 @@
 # datist – Änderungen
 
+## 1.6.1 (2026-10-25)
+- **Update-Knopf**: Neben der Versionsnummer steht „󰑐“ – Klick sucht sofort nach einem Update. Gibt es eine neuere
+  Version, wird daraus „󰚰 update“; ein Klick lädt und installiert sie (Linux und Windows), danach heißt er „󰑓 neu starten“.
+- **Rückmeldung bei Umschalt-Knöpfen**: „An“ (z. B. „Ton behalten“) ist jetzt auch unter dem Mauszeiger zu sehen,
+  Drücken färbt sofort – man muss die Maus nicht mehr wegbewegen, um zu sehen, ob der Klick angekommen ist.
+- **2 Finger auch vorwärts**: Nach einem Zurück-Wischen bringt das Wischen in die andere Richtung zur verlassenen
+  Seite zurück.
+- **Windows: echte Titelleiste** – das Fenster lässt sich verschieben, in der Größe ändern, minimieren und
+  maximieren.
+
 ## 1.6.0 (2026-10-22)
 - **Wo stehe ich gerade? – Woche**: minutengenaue Jetzt-Linie mit Punkt in der heutigen Spalte (über den
   Terminen, verdeckt nichts), dünn durch die anderen Tage, links die Uhrzeit als Marke; die heutige Spalte ist
