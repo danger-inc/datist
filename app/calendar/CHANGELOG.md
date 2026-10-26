@@ -1,5 +1,8 @@
 # datist – Änderungen
 
+## 1.7.0 (2026-10-26)
+- **Design wählbar**: In den Einstellungen gibt es die Designauswahl wie in notist (Automatisch + 9 Designs). Die Wahl gilt für alle -ist-Apps zugleich und wirkt sofort. Bei „Automatisch“ (Desktop-Farben) kannst du zwischen **Dunkel** und **Hell** umschalten.
+
 ## 1.6.2 (2026-10-25)
 - **Windows**: Speichern brach bei Zeichen wie „☑“ mit einem Zeichensatz-Fehler ab; Textdateien werden dort jetzt
   immer als UTF-8 gelesen und geschrieben.

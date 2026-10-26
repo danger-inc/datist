@@ -2586,6 +2586,7 @@ class Kalender(Gtk.Application):
     def build_account(self):
         self.acct = vbox(spacing=8)
         self.acct.set_margin_top(4)
+        self.acct.append(tui.theme_panel())
         # Google
         self.g_panel = tui.Panel("google kalender")
         self.g_status = label("", markup=True, wrap=True)
@@ -2599,7 +2600,7 @@ class Kalender(Gtk.Application):
         self.c_list = vbox(spacing=2)
         self.c_panel.body.append(self.c_list)
         self.acct.append(self.c_panel)
-        self.f_panel = tui.Panel("farben · aus matugen")
+        self.f_panel = tui.Panel("farben · aus dem design")
         self.f_area = Gtk.DrawingArea(content_height=60, hexpand=True)
         self.f_area.set_draw_func(self.draw_legend)
         self.f_panel.body.append(self.f_area)

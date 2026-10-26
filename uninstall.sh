@@ -8,7 +8,7 @@ rm -f "$HOME/.local/bin/datist" "$HOME/.local/share/applications/datist.desktop"
       "$HOME/.local/share/icons/hicolor/scalable/apps/datist.svg"
 # gemeinsame Bausteine nur entfernen, wenn keine andere Suite-App (musicalist, wallist) sie noch braucht
 if [ ! -d "$RICE/music" ] && [ ! -d "$HOME/.local/share/wallist" ] && [ ! -d "$HOME/.local/share/mailist" ] && [ ! -d "$HOME/.local/share/sharist" ] && [ ! -d "$HOME/.local/share/linguist" ]; then
-    rm -rf "$RICE/fonts" "$RICE/tui.py" "$RICE/glass.py" "$RICE/__pycache__"
+    rm -rf "$RICE/fonts" "$RICE/tui.py" "$RICE/glass.py" "$RICE/istheme.py" "$RICE/__pycache__"
     rmdir "$RICE" 2>/dev/null || true
 fi
 echo "datist entfernt. Deine Termine liegen weiter in ~/.local/share/kalender."
