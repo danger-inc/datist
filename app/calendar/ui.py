@@ -1060,6 +1060,7 @@ class Kalender(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID)
         self.win = None
+        self.daemon = False
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
@@ -1078,6 +1079,12 @@ class Kalender(Gtk.Application):
             self.open_account()
 
     def do_activate(self):
+        if self.daemon:             # --daemon: Fenster vorbereiten, aber erst beim nächsten Aufruf zeigen
+            self.daemon = False
+            if not self.win:
+                self.build()
+            self.hold()
+            return
         if self.win and self.win.get_visible() and self.win.is_active():
             self.win.close()               # Super+K zum Ein-/Ausblenden
             return
@@ -2844,4 +2851,11 @@ if __name__ == "__main__":
             sys.exit(0)
         app.connect("activate", lambda a: GLib.idle_add(lambda: (a.show_tab_now(tab), False)[1]))
         sys.exit(app.run([sys.argv[0]]))
-    sys.exit(Kalender().run(sys.argv))
+    app = Kalender()
+    if "--daemon" in sys.argv:               # datist --daemon: beim Login vorladen, Super+K zeigt dann sofort
+        sys.argv.remove("--daemon")
+        app.daemon = True
+        app.register(None)
+        if app.get_is_remote():              # läuft schon → nichts tun (sonst würde es das Fenster umschalten)
+            sys.exit(0)
+    sys.exit(app.run(sys.argv))
