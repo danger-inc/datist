@@ -25,7 +25,7 @@ echo
 say "Kopiere datist nach $RICE/calendar …"
 mkdir -p "$RICE/calendar" "$RICE/fonts" "$BIN" "$APPS" "$ICONS"
 cp -f "$SRC"/app/calendar/*.py "$SRC"/app/calendar/VERSION "$SRC"/app/calendar/CHANGELOG.md "$RICE/calendar/"
-cp -f "$SRC/app/tui.py" "$SRC/app/glass.py" "$SRC/app/istheme.py" "$SRC/app/changelog.py" "$SRC/app/swipe.py" "$RICE/"             # gemeinsame Bausteine der Suite
+cp -f "$SRC/app/tui.py" "$SRC/app/glass.py" "$SRC/app/istheme.py" "$SRC/app/ist-swipe.py" "$SRC/app/changelog.py" "$SRC/app/swipe.py" "$RICE/"             # gemeinsame Bausteine der Suite
 cp -f "$SRC"/app/fonts/* "$RICE/fonts/"                           # Symbolschrift (Icons ohne Nerd Font)
 install -m 755 "$SRC/datist.sh" "$BIN/datist"
 sed "s|@EXEC@|$BIN/datist|g" "$SRC/datist.desktop.in" > "$APPS/datist.desktop"
