@@ -1,5 +1,8 @@
 # datist – Änderungen
 
+## 1.8.1 (2026-10-27)
+- **Alt+Zahl wechselt den Tab**: Alt+1 Tag, Alt+2 Woche, Alt+3 Monat – auch beim Tippen in einem Feld (im Termin-Editor wählen 1–7 die DS, solange man nicht in einem Feld tippt; Alt+1–7 geht immer).
+
 ## 1.8.0 (2026-10-27)
 - **Wechsel-Animation**: Der Wechsel zwischen Hell und Dunkel (und zwischen Designs) läuft als Scanbalken über den ganzen Bildschirm. Alle Fenster, die Leiste und das Terminal wechseln darunter im selben Moment, hinter dem Balken steht das neue Design. An/aus und Dauer (Standard 1,5 s) stehen in der Designauswahl der Einstellungen.
 

@@ -590,7 +590,7 @@ class Editor(Gtk.Box):
         self.msg = label("", "warn", wrap=True)
         b.append(self.msg)
         self.del_btn = tui.Button("löschen", self.delete, danger=True)
-        self.keys_hint = label("alt+1–7 ds · strg+⏎ speichern · esc abbrechen", "dim")
+        self.keys_hint = label("1–7 ds (alt+1–7 beim tippen) · strg+⏎ speichern · esc abbrechen", "dim")
         btns = wrapbox(tui.Button("speichern ⏎", self.save), self.del_btn, tui.Button("abbrechen", self.close),
                        self.keys_hint)
         btns.set_margin_top(6)
@@ -978,7 +978,10 @@ class Editor(Gtk.Box):
         if state & Gdk.ModifierType.CONTROL_MASK and kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_s):
             self.save()
             return True
-        if state & Gdk.ModifierType.ALT_MASK and Gdk.KEY_1 <= kv <= Gdk.KEY_7:
+        root = self.get_root()
+        typing = isinstance(root.get_focus() if root else None, (Gtk.Text, Gtk.TextView))
+        mods = state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SUPER_MASK)
+        if Gdk.KEY_1 <= kv <= Gdk.KEY_7 and (state & Gdk.ModifierType.ALT_MASK or (not mods and not typing)):
             self.pick_ds(kv - Gdk.KEY_0, extend=bool(state & Gdk.ModifierType.SHIFT_MASK))
             return True
         return False
@@ -2399,6 +2402,13 @@ class Kalender(Gtk.Application):
     def on_key(self, ctrl, kv, code, state):
         if self.editor.get_visible() or self.quick_rev.get_reveal_child():
             return False
+        if (state & Gdk.ModifierType.ALT_MASK and not state & Gdk.ModifierType.CONTROL_MASK
+                and Gdk.KEY_1 <= kv <= Gdk.KEY_9):          # Alt+Zahl = Tab wechseln (auch beim Tippen)
+            i = kv - Gdk.KEY_1
+            if i < len(self.win.tab_btns):
+                self.focus_uid = None
+                self.win.tab_btns[i][1].set_active(True)
+            return True
         focus = self.win.get_focus()
         if isinstance(focus, (Gtk.Text, Gtk.TextView)):
             return False
