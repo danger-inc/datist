@@ -4,6 +4,7 @@
 # Tasten: h/j/k/l bewegen, H/L Zeitraum, d/w/m Ansicht, t heute, n neu, a Schnelleingabe, ⏎ bearbeiten,
 #         x löschen, Tab nächster Termin, g Datum, s abgleichen, ? Hilfe, Esc schließen.
 import colorsys, copy, datetime as dt, math, os, re, sys, time
+os.environ.setdefault("GSK_RENDERER", "gl")        # Vulkan lässt mit der Cursor-Spur Bilder aus (gemessen: 33 statt 17 ms)
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
@@ -45,6 +46,7 @@ CSS = """
 .editor-card.see-through, .glass .editor-card.see-through {
     background-color: alpha(@background, 0.55); backdrop-filter: blur(14px);
 }
+.editor-card.see-through.typing, .glass .editor-card.see-through.typing { backdrop-filter: none; background-color: alpha(@background, 0.9); }
 .flabel { color: @secondary; min-width: 64px; }
 button.ds { padding: 1px 7px; border: 1px solid alpha(@primary, 0.45); border-radius: 4px; background: none;
     box-shadow: none; min-height: 0; min-width: 0; color: @foreground; }
@@ -130,8 +132,21 @@ def google_color(rgb):
 
 
 class Palette:
-    def __init__(self):
+    _cache = (None, None)       # (Farbtabelle, Palette): wird bei jedem Neuladen der Farben ein neues Objekt
+
+    def __new__(cls):
         c = tui.colors()
+        key = tuple((k, v.red, v.green, v.blue) for k, v in c.items())     # Farbtabelle wird beim Neuladen verändert
+        if cls._cache[0] != key:
+            self = super().__new__(cls)
+            self._build(c)
+            cls._cache = (key, self)
+        return cls._cache[1]
+
+    def __init__(self):
+        pass
+
+    def _build(self, c):
 
         def rgb(name, fb):
             v = c.get(name)
@@ -1135,7 +1150,11 @@ class Kalender(Gtk.Application):
         # Konto & Einstellungen: eigenes Fenster, Knopf rechts neben der Version
         self.acct_btn = tui.Button("󰀄 konto", self.open_account,
                                    tooltip="konto & einstellungen – google, kalender, farben, semester")
-        win.header_extra.append(self.acct_btn)
+        self.acct_btn.set_visible(False)           # ersetzt durch den Einstellungs-Knopf (Zahnrad) ganz rechts
+        # Einstellungs-Knopf wie in mailist: Zahnrad zwischen Version und Glas-Schalter
+        self.gear_btn = tui.Button("\U000F0493", self.open_account, tooltip="Einstellungen")
+        self.gear_btn.set_margin_start(6)
+        win.header_extra.get_parent().insert_child_after(self.gear_btn, win.header_extra)
         self.acct_win = None
         self._gpal = None
         self._color_tried = set()
@@ -1290,6 +1309,15 @@ class Kalender(Gtk.Application):
         on = self.store.settings.get("see_through", True)
         for w in (self.editor, self.help):
             (w.add_css_class if on else w.remove_css_class)("see-through")
+        if not getattr(self, "_typing_hook", False):
+            self._typing_hook = True
+            # Beim Tippen rechnet der Blur hinter dem Editor bei jedem Cursor-Bild neu → ruckelt. Dort ohne Blur.
+            def focus(win, *_):
+                f = win.get_focus()
+                typing = f is not None and isinstance(f, (Gtk.Text, Gtk.TextView)) and f.is_ancestor(self.editor)
+                (self.editor.add_css_class if typing else self.editor.remove_css_class)("typing")
+            hooked = []
+            self.editor.connect("map", lambda w: hooked or hooked.append(w.get_root().connect("notify::focus-widget", focus)))
 
     # ----- 2-Finger-Zurück: Tab-Verlauf, endet immer in der Wochenansicht -----
     NAV_NAMES = {"day": "¹ tag", "week": "² woche", "month": "³ monat"}
@@ -1392,6 +1420,12 @@ class Kalender(Gtk.Application):
     def acct_open(self):
         return bool(self.acct_win and self.acct_win.get_visible())
 
+    def quit_app(self):
+        """Ganz schließen (nicht nur verstecken): Fenster, Konto-Fenster und Prozess."""
+        if self.acct_win is not None:
+            self.acct_win.destroy()
+        self.quit()
+
     def open_account(self):
         if self.acct_win is None:
             w = Gtk.Window(title="datist · konto", transient_for=self.win, modal=False, hide_on_close=True)
@@ -1402,8 +1436,10 @@ class Kalender(Gtk.Application):
             top = hbox(label("datist", "brand"), label("konto & einstellungen", "accent"), label("", hexpand=True),
                        spacing=10)
             top.add_css_class("topbar")
+            top.append(tui.Button("󰗼 datist beenden", self.quit_app, tooltip="datist ganz schließen (nicht nur verstecken)"))
             close = tui.Button("✕", w.close, tooltip="Schließen (Esc)")
             close.add_css_class("close")
+            close.set_margin_start(4)
             top.append(close)
             scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True, child=self.acct)
             scroll.set_margin_start(14)
