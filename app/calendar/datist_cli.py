@@ -104,7 +104,7 @@ def cmd_waybar():
         text = f"󰃭 {o['s']:%H:%M} {title}" if o["s"].date() == t0.date() else f"󰃭 {WEEKDAYS[o['s'].weekday()]} {o['s']:%H:%M} {title}"
         if running:
             cls, text = "now", f"󰃭 läuft: {title}"
-        elif mins <= 15:
+        elif mins <= 10:
             cls = "soon"
             text = f"󰃭 {title} {rel(mins)}"
         elif mins <= 120 and o["s"].date() == t0.date():

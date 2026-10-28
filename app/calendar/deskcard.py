@@ -103,7 +103,7 @@ class DeskContent(Gtk.Box):
         else:
             mins = int((o["s"] - now).total_seconds() // 60)
             when = f"{o['s']:%H:%M}" + (f" · {mins} min" if 0 <= mins <= 90 and o["s"].date() == now.date() else "")
-        cls = "desk-now" if running else "desk-soon" if (not allday and 0 <= (o["s"] - now).total_seconds() <= 900) else "dim"
+        cls = "desk-now" if running else "desk-soon" if (not allday and 0 <= (o["s"] - now).total_seconds() <= 600) else "dim"
         title = ("⚡ " if o.get("conflict") else "") + (o.get("title") or "Termin") + \
             (f" · {o['location']}" if o.get("location") else "")
         r = hbox(label(when, cls, xalign=0), label(title, hexpand=True, ellipsize=True, xalign=0), spacing=10)
