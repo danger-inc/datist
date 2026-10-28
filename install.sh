@@ -14,10 +14,10 @@ UPDATE=0; [[ "${1:-}" == "--update" ]] && UPDATE=1
 say "== datist installieren =="
 if ask "Systempakete installieren (GTK4, PyGObject)?"; then
     pkg_install \
-        "gtk4 python python-gobject python-cairo adwaita-icon-theme xdg-utils" \
-        "python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 adwaita-icon-theme xdg-utils" \
-        "python3 python3-gobject python3-cairo gtk4 adwaita-icon-theme xdg-utils" \
-        "python3 python3-gobject python3-gobject-cairo python3-gobject-Gdk typelib-1_0-Gtk-4_0 adwaita-icon-theme xdg-utils" \
+        "gtk4 python python-gobject python-cairo adwaita-icon-theme xdg-utils libnotify gtk4-layer-shell" \
+        "python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 adwaita-icon-theme xdg-utils libnotify-bin gir1.2-gtk4layershell-1.0 libgtk4-layer-shell0" \
+        "python3 python3-gobject python3-cairo gtk4 adwaita-icon-theme xdg-utils libnotify gtk4-layer-shell" \
+        "python3 python3-gobject python3-gobject-cairo python3-gobject-Gdk typelib-1_0-Gtk-4_0 adwaita-icon-theme xdg-utils libnotify-tools typelib-1_0-Gtk4LayerShell-1_0" \
         || warn "Paketinstallation nicht vollständig – weiter."
 fi
 echo

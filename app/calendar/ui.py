@@ -24,6 +24,18 @@ from raster import DS, TZ, WEEKDAYS, WEEKDAYS_LONG, MONTHS, CATS, CAT_NAMES, CAT
 import rrule
 import store as st
 import gcal
+import holidays
+import quickparse
+import reminders
+import searchview
+import agendaview
+import barstate
+import deskcard
+
+os.environ.pop("LD_PRELOAD", None)    # gtk4-layer-shell ist schon geladen – Kindprozesse (Browser) sollen es nicht erben
+from zoneinfo import ZoneInfo
+from dragmove import DragMixin
+from acctpanels import AcctMixin
 
 APP_ID = "de.invincible.Datist"
 SYNC_EVERY = 300          # Sekunden
@@ -51,6 +63,7 @@ CSS = """
 button.ds { padding: 1px 7px; border: 1px solid alpha(@primary, 0.45); border-radius: 4px; background: none;
     box-shadow: none; min-height: 0; min-width: 0; color: @foreground; }
 button.ds:hover { background-color: alpha(@primary, 0.18); }
+button.rowhead.sel-row { background-color: alpha(@primary, 0.2); }
 button.ds.on { background-color: @primary; color: @on_primary; border-color: @primary; }
 .notes-box { background-color: alpha(@background, 0.45); border: 1px solid alpha(@primary, 0.45); border-radius: 4px;
     padding: 3px 8px; }
@@ -186,7 +199,7 @@ class Palette:
 # =====================================================================
 # Zeichenraster: alles in Zeichenzellen (Monospace) wie im Terminal
 # =====================================================================
-class Cells(Gtk.DrawingArea):
+class Cells(DragMixin, Gtk.DrawingArea):
     def __init__(self, app, view):
         super().__init__(hexpand=True, vexpand=True, focusable=True)
         self.app, self.view = app, view
@@ -198,6 +211,7 @@ class Cells(Gtk.DrawingArea):
         click = Gtk.GestureClick()
         click.connect("pressed", self._click)
         self.add_controller(click)
+        self.init_drag()
         scroll = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.VERTICAL)
         scroll.connect("scroll", self._scroll)
         scroll.connect("scroll-end", lambda *_: setattr(self, "_acc", 0.0))
@@ -345,6 +359,7 @@ class Cells(Gtk.DrawingArea):
                 if dot:
                     cr.arc(c * cw, y, lw * 2.2, 0, 2 * math.pi)
                     cr.fill()
+        self.draw_ghost(cr, cw, ch, layout)
 
     def _click(self, gesture, n, x, y):
         self.grab_focus()
@@ -355,6 +370,8 @@ class Cells(Gtk.DrawingArea):
             if rc <= c < rc + rw and rr <= r < rr + rh:
                 hit = payload
                 break
+        if hit and self.click_owned_by_drag(hit, gesture.get_current_button()):
+            return                                  # Termin: die Zieh-Geste entscheidet (Klick oder Verschieben)
         if hit:
             self.app.on_hit(self.view, hit, n, gesture.get_current_button())
 
@@ -559,6 +576,44 @@ class Editor(Gtk.Box):
             e.connect("changed", lambda *_: (self.sync_ds(), self.preview.queue_draw()))
         self.allday = tui.Check("ganztägig", callback=lambda on: self.on_allday(on))
         row("zeit", hbox(self.t_from, label("–", "dim"), self.t_to, spacing=6), self.allday, wrap=True)
+        self.remind = tui.Entry("", width=16, activate=self.save)
+        self.remind.set_tooltip_text("Meldung vor dem Termin: 10, 30 min, 2 h, 1 tag, zum beginn, keine – leer = Standard")
+        self.remind_pick = tui.Select(lambda v: self.remind.set_text(v), tooltip="Vorlauf wählen", max_chars=1)
+        self.remind_pick.set_options([("", "standard"), ("keine", "keine"), ("zum beginn", "zum beginn")] +
+                                     [(reminders.fmt_lead(m), reminders.fmt_lead(m))
+                                      for m in (5, 10, 15, 30, 60, 120, 1440)], None)
+        self.remind_pick.lbl.set_label("")
+        row("erinnerung", self.remind, self.remind_pick, wrap=True)
+        self.tz = tui.Entry("", width=22, activate=self.save)
+        self.tz.set_tooltip_text("Zeitzone des Termins, z. B. America/New_York – leer = deine Zeit. "
+                                 "Die Uhrzeiten oben gelten dann in dieser Zone.")
+        self.tz.connect("changed", lambda *_: self.update_tz_hint())
+        self.tz_pick = tui.Select(lambda v: self.tz.set_text(v), tooltip="häufige Zeitzonen", max_chars=1)
+        self.tz_pick.set_options([("", "lokal")] + [(z, z) for z in (
+            "UTC", "Europe/London", "Europe/Paris", "Europe/Istanbul", "America/New_York", "America/Chicago",
+            "America/Los_Angeles", "Asia/Dubai", "Asia/Kolkata", "Asia/Shanghai", "Asia/Tokyo", "Australia/Sydney")], None)
+        self.tz_pick.lbl.set_label("")
+        self.tz_hint = label("", "dim", hexpand=True, ellipsize=True)
+        self.tz_row = row("zeitzone", self.tz, self.tz_pick, self.tz_hint, wrap=True)
+        self.guests = tui.Entry("anna@example.org, ben@example.org", activate=self.save)
+        self.guest_hint = label("", "dim", wrap=True)
+        self.guest_row = row("gäste", self.guests)
+        self.guest_hint_row = row("", self.guest_hint)
+        self.meet_chk = tui.Check("Google Meet-Link erstellen", False,
+                                  tooltip="Beim Speichern legt Google einen Meet-Link am Termin an")
+        self.meet_lbl = label("", "dim", ellipsize=True, hexpand=True)
+        self.meet_open = tui.Button("öffnen", lambda: self.meet_url and Gio.AppInfo.launch_default_for_uri(self.meet_url, None))
+        self.meet_copy = tui.Button("kopieren", self.copy_meet)
+        self.meet_row = row("meet", self.meet_chk, self.meet_lbl, self.meet_open, self.meet_copy, wrap=True)
+        self.send_chk = tui.Check("Einladungen / Änderungen an Gäste senden (nur dieses Speichern)", False,
+                                  tooltip="Standard: es geht keine Mail raus. Hier anhaken, wenn Google die Gäste "
+                                          "benachrichtigen soll.")
+        self.send_row = row("einladung", self.send_chk, wrap=True)
+        self.meet_url, self.guest_orig, self.guest_org = "", [], True
+        self.bar_chk = tui.Check("in der Waybar zeigen", True, self.on_bar_toggle,
+                                 tooltip="Aus: dieser Termin (bei Serien die ganze Serie) erscheint nicht als nächster Termin in der Leiste")
+        self.bar_row = row("waybar", self.bar_chk, wrap=True)
+        self._bar_o = None
         self.loc = tui.Entry("Hörsaal, z. B. MA/041", activate=self.save)
         self.loc_pick = tui.Select(lambda v: self.loc.set_text(v), tooltip="zuletzt benutzte Orte", max_chars=1)
         row("ort", self.loc, self.loc_pick)
@@ -615,6 +670,7 @@ class Editor(Gtk.Box):
                   "start": st.iso(dt.datetime.combine(day, a)), "end": st.iso(dt.datetime.combine(day, e)),
                   "location": "", "link": "", "notes": "", "cat": "", "tone": "", "rrule": None}
         self.ev = copy.deepcopy(ev)
+        self.ro = (not new) and app.store.is_readonly(ev)
         self.cat_manual = bool(ev.get("cat")) and not new
         self.panel.set_title("neuer termin" if new else "termin bearbeiten")
         self.del_btn.set_visible(not new)
@@ -624,13 +680,17 @@ class Editor(Gtk.Box):
         self.scope = "instance" if is_series else "single"
         self.scope_inst.set_active(True)
         self.scope_series.set_active(False)
-        self.msg.set_label("")
+        self.msg.set_label("🔒 nur lesbar (Abo oder Kalender ohne Schreibrecht) – esc schließt" if self.ro else "")
+        self.del_btn.set_visible(not new and not self.ro)
         self.set_visible(True)
         self.opened = self.form()
         GLib.idle_add(lambda: (self.title.grab_focus(), self.title.set_position(-1)) and False)
 
     def dismiss(self):
         """Wegklicken: unverändert → einfach zu; geändert → speichern (bei Fehler bleibt er offen)."""
+        if getattr(self, "ro", False):
+            self.close()
+            return
         now, was = self.form(), dict(getattr(self, "opened", None) or {})
         now.pop("cat_manual", None)
         was.pop("cat_manual", None)
@@ -646,11 +706,19 @@ class Editor(Gtk.Box):
         self.tone.hover = None
         self.tone.set_options([("", "auto (typ)")] + TONES, ev.get("tone") or "")
         cals = app.store.writable()
-        if ev.get("gid") or ev.get("uid", "").startswith("local-"):
+        if ev.get("gid") or ev.get("uid", "").startswith("local-") or app.store.is_readonly(ev):
             cals = [c for c in app.store.all_calendars() if c["id"] == ev["cal"]] or cals   # Kalender nicht wechselbar
         self.cal.set_options([(c["id"], ("◆ " if c["id"] == "local" else "◇ ") + c["name"]) for c in cals], ev["cal"])
         allday = bool(ev.get("allday"))
         s, e = st.parse_when(ev["start"], allday), st.parse_when(ev["end"], allday)
+        tzname = None if allday else ev.get("tz")
+        if tzname:                                       # Termin in fremder Zeitzone: Zeiten in dieser Zone zeigen
+            try:
+                zone = ZoneInfo(tzname)
+                s = dt.datetime.fromisoformat(ev["start"]).astimezone(zone).replace(tzinfo=None)
+                e = dt.datetime.fromisoformat(ev["end"]).astimezone(zone).replace(tzinfo=None)
+            except (ValueError, KeyError):
+                tzname = None
         if allday:
             e -= dt.timedelta(days=1)
         self.date.set_text(raster.fmt_date(s.date()))
@@ -662,6 +730,22 @@ class Editor(Gtk.Box):
         self.t_to.set_text("" if allday else f"{e:%H:%M}")
         self.allday.set_active(allday)
         self.on_allday(allday)
+        self.tz.set_text(tzname or "")
+        self.meet_url = ev.get("meet") or ""
+        self.meet_chk.set_active(False)
+        self.meet_lbl.set_label(self.meet_url.replace("https://", "") if self.meet_url else "")
+        self.guest_orig = [a for a in (ev.get("attendees") or [])]
+        self.guest_org = bool(ev.get("organizer_self", True))
+        self.guests.set_text(", ".join(a["email"] for a in self.guest_orig if not a.get("self")))
+        self.send_chk.set_active(False)
+        self._bar_o = None if not ev.get("uid") else {**ev, "s": None}        # neuer Termin: erst nach dem Speichern
+        self.bar_chk.set_active(not (self._bar_o and barstate.is_hidden(self._bar_o)))
+        self.bar_chk.set_sensitive(self._bar_o is not None)
+        self.sync_google_rows()
+        self.update_tz_hint()
+        self.remind.set_text(reminders.fmt_lead(ev.get("remind")))
+        dflt = reminders.fmt_lead(app.reminders.default_lead()) if getattr(app, "reminders", None) else "10 min"
+        self.remind.set_placeholder_text(f"standard ({dflt})")
         self.loc.set_text(ev.get("location", ""))
         locs = app.store.recent_locations()
         self.loc_pick.set_options([(l, l) for l in locs], None)
@@ -745,6 +829,7 @@ class Editor(Gtk.Box):
 
     def on_cal(self, v):
         self.cal.set_options(self.cal.options, v)
+        self.sync_google_rows()
 
     def sem_sensitive(self):
         on = self.sem.active
@@ -903,7 +988,8 @@ class Editor(Gtk.Box):
                 "tone": self.tone.current, "loc": self.loc.get_text(), "link": self.link.get_text(),
                 "notes": buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False),
                 "from": self.t_from.get_text(), "to": self.t_to.get_text(), "allday": self.allday.active,
-                "date": self.date.get_text(), "date_to": self.date_to.get_text()}
+                "date": self.date.get_text(), "date_to": self.date_to.get_text(), "remind": self.remind.get_text(),
+                "tz": self.tz.get_text(), "guests": self.guests.get_text(), "meet": self.meet_chk.active}
 
     def restore(self, f):
         self.title.set_text(f["title"])
@@ -919,6 +1005,10 @@ class Editor(Gtk.Box):
         self.t_to.set_text(f["to"])
         self.date.set_text(f["date"])
         self.date_to.set_text(f["date_to"])
+        self.remind.set_text(f.get("remind", ""))
+        self.tz.set_text(f.get("tz", ""))
+        self.guests.set_text(f.get("guests", ""))
+        self.meet_chk.set_active(f.get("meet", False))
         self.sync_ds()
         self.update_hint()
 
@@ -953,7 +1043,7 @@ class Editor(Gtk.Box):
             self.msg.set_label("")
             self.fill({**res, "series": None})
             self.restore(f)
-        tui.background(gcal.master, o["cal"], o["series"], done=done)
+        tui.background(gcal.master, o["cal"], o["series"], o.get("acct", gcal.MAIN), done=done)
 
     def open_link(self):
         url = self.link.get_text().strip()
@@ -1003,6 +1093,10 @@ class Editor(Gtk.Box):
         ev["tone"] = self.tone.current or ""
         ev["cal"] = self.cal.current
         ev["location"] = self.loc.get_text().strip()
+        try:
+            ev["remind"] = reminders.parse_lead(self.remind.get_text())
+        except ValueError as e:
+            raise ValueError("Erinnerung: " + str(e)) from None
         ev["link"] = self.link.get_text().strip()
         buf = self.notes.get_buffer()
         ev["notes"] = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False).strip()
@@ -1017,10 +1111,20 @@ class Editor(Gtk.Box):
             elif ev.get("sem"):                     # war Semester-Serie: deren Auslassungen gelten nicht mehr
                 ev["sem"] = None
                 ev["exdates"] = []
+        tzname = self.tz.get_text().strip()
+        zone = None
+        if tzname and not self.allday.active:
+            try:
+                zone = ZoneInfo(tzname)
+            except Exception:  # noqa: BLE001
+                raise ValueError(f"Zeitzone „{tzname}“ kenne ich nicht (z. B. America/New_York, Asia/Tokyo)") from None
+            if ev.get("rrule") and ev["cal"] == "local":
+                raise ValueError("Eigene Zeitzone geht im lokalen Kalender nicht mit Wiederholung")
         if self.allday.active:
             ev["allday"] = True
             ev["start"] = d.isoformat()
             ev["end"] = (d + dt.timedelta(days=span + 1)).isoformat()
+            ev["tz"] = None
         else:
             a = raster.parse_time(self.t_from.get_text())
             e = raster.parse_time(self.t_to.get_text())
@@ -1030,13 +1134,85 @@ class Editor(Gtk.Box):
                     raise ValueError("Ende liegt vor dem Beginn")
                 f += dt.timedelta(days=1) if e < a else dt.timedelta(minutes=90)
             ev["allday"] = False
-            ev["start"], ev["end"] = st.iso(s), st.iso(f)
+            if zone is not None:
+                ev["start"] = s.replace(tzinfo=zone).isoformat(timespec="seconds")
+                ev["end"] = f.replace(tzinfo=zone).isoformat(timespec="seconds")
+                ev["tz"] = tzname
+            else:
+                ev["start"], ev["end"] = st.iso(s), st.iso(f)
+                ev["tz"] = None
+        if ev["cal"] != "local" and not self.ro:
+            self.collect_guests(ev)
         if ex_days is not None:
             ev["exdates"] = [x.isoformat() if ev["allday"] else
                              st.iso(dt.datetime.combine(x, st.parse_when(ev["start"], False).time())) for x in ex_days]
         return ev
 
+    def on_bar_toggle(self, on):
+        o = self._bar_o
+        if not o:
+            return
+        if on:
+            barstate.show(barstate.key_of(o))
+        else:
+            barstate.hide({**o, "s": self.orig["s"]} if self.orig and self.orig.get("s") else o)
+        barstate.signal_waybar()
+        self.app.win.say(("in der Waybar wieder gezeigt: " if on else "in der Waybar versteckt: ") + (o.get("title") or "Termin"))
+
+    def copy_meet(self):
+        if self.meet_url:
+            Gdk.Display.get_default().get_clipboard().set_content(Gdk.ContentProvider.new_for_value(self.meet_url))
+            self.app.win.say("Meet-Link kopiert")
+
+    def sync_google_rows(self):
+        """Gäste/Meet/Einladung gibt es nur bei Google-Terminen; Gäste ändert nur, wer den Termin organisiert."""
+        google = self.cal.current not in (None, "", "local")
+        for w in (self.guest_row, self.guest_hint_row, self.meet_row, self.send_row):
+            w.set_visible(google)
+        self.guests.set_sensitive(self.guest_org and not getattr(self, "ro", False))
+        self.meet_chk.set_visible(not self.meet_url)
+        self.meet_open.set_visible(bool(self.meet_url))
+        self.meet_copy.set_visible(bool(self.meet_url))
+        self.guest_hint.set_label("" if self.guest_org else "Du bist hier nur eingeladen – Gäste kann nur der Organisator ändern.")
+
+    def update_tz_hint(self):
+        """Zeigt, wie spät es bei dir ist, wenn eine fremde Zeitzone eingetragen ist."""
+        name = self.tz.get_text().strip()
+        if not name:
+            self.tz_hint.set_label("")
+            return
+        try:
+            zone = ZoneInfo(name)
+            d = self.day()
+            a, b = raster.parse_time(self.t_from.get_text()), raster.parse_time(self.t_to.get_text())
+            s = dt.datetime.combine(d, a, tzinfo=zone).astimezone(TZ)
+            f = dt.datetime.combine(d, b, tzinfo=zone).astimezone(TZ)
+            self.tz_hint.set_label(f"bei dir: {s:%H:%M}–{f:%H:%M}" + ("" if s.date() == d else f" ({s:%a %d.%m.})"))
+        except Exception:  # noqa: BLE001 – unfertige Eingabe
+            self.tz_hint.set_label("Zeitzone unbekannt" if name and "/" in name else "")
+
+    def collect_guests(self, ev):
+        """Gästefeld → ev["attendees"] (+ attendees_edit nur bei Änderung, damit Google sonst unangetastet bleibt)."""
+        if not self.guest_org:
+            return
+        raw = [x for x in re.split(r"[,;\s]+", self.guests.get_text().strip()) if x]
+        for x in raw:
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", x):
+                raise ValueError(f"„{x}“ ist keine E-Mail-Adresse")
+        want = list(dict.fromkeys(x.lower() for x in raw))
+        have = {a["email"].lower(): a for a in self.guest_orig}
+        mine = [a for a in self.guest_orig if a.get("self")]
+        shown = [e for e in have if not have[e].get("self")]
+        if set(want) != set(shown):
+            ev["attendees"] = mine + [have.get(e) or {"email": e} for e in want]
+            ev["attendees_edit"] = True
+        if self.meet_chk.active and not self.meet_url:
+            ev["meet_create"] = True
+
     def save(self):
+        if getattr(self, "ro", False):
+            self.msg.set_label("✗ nur lesbar – hier lässt sich nichts speichern")
+            return
         try:
             ev = self.collect()
         except ValueError as e:
@@ -1048,7 +1224,11 @@ class Editor(Gtk.Box):
             ev["uid"] = self.master.get("uid")
             ev["series"] = None
         shown = self.day()            # dort bleiben, wo man den Termin sieht (Serie: nicht zum Serienbeginn)
-        self.app.store.save_event(ev, scope=scope, original=self.orig)
+        try:
+            self.app.store.save_event(ev, scope=scope, original=self.orig, send=self.send_chk.active)
+        except ValueError as e:
+            self.msg.set_label(f"✗ {e}")
+            return
         self.close()
         self.app.after_edit(f"gespeichert: {ev['title']}")
         if shown:
@@ -1056,6 +1236,8 @@ class Editor(Gtk.Box):
         self.app.redraw()
 
     def delete(self):
+        if getattr(self, "ro", False):
+            return
         if self.del_btn.get_label() != "wirklich?":
             self.del_btn.set_label("wirklich?")
             GLib.timeout_add(2500, lambda: self.del_btn.set_label("löschen") and False)
@@ -1074,7 +1256,10 @@ class Editor(Gtk.Box):
 # =====================================================================
 # App
 # =====================================================================
-class Kalender(Gtk.Application):
+ACCT_PAGES = [("allgemein", "allgemein"), ("google", "google"), ("kalender", "kalender"),
+              ("erinnerungen", "erinnerungen"), ("leiste", "leiste & desktop")]
+
+class Kalender(AcctMixin, Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID)
         self.win = None
@@ -1085,16 +1270,22 @@ class Kalender(Gtk.Application):
         act = Gio.SimpleAction.new("show-tab", GLib.VariantType.new("s"))
         act.connect("activate", lambda a, v: self.show_tab_now(v.get_string()))
         self.add_action(act)
+        act = Gio.SimpleAction.new("toggle-desk", None)
+        act.connect("activate", lambda *_: self.toggle_desk())
+        self.add_action(act)
 
     def show_tab_now(self, tid):
         if not self.win:
             self.build()
         getattr(tui.glass, "bring_here", lambda w: None)(self.win)
         self.win.present()
-        if tid in ("day", "week", "month"):
+        if tid in ("day", "week", "month", "agenda", "tasks"):
             self.win.show_tab(tid)
-        elif tid in ("acct", "konto", "settings"):
+        elif tid in ("acct", "konto", "settings") or tid.startswith("acct:") or tid in ("bar", "desk-settings"):
             self.open_account()
+            page = {"bar": "leiste", "desk-settings": "leiste"}.get(tid, tid.split(":", 1)[1] if ":" in tid else None)
+            if page in self.acct_tabs:
+                self.acct_tabs[page].set_active(True)
 
     def do_activate(self):
         if self.daemon:             # --daemon: Fenster vorbereiten, aber erst beim nächsten Aufruf zeigen
@@ -1112,10 +1303,24 @@ class Kalender(Gtk.Application):
         self.win.present()
         self.focus_view()
 
+    def remind_tick(self):
+        try:
+            self.reminders.tick()
+        except Exception as e:  # noqa: BLE001 – der Takt darf nie sterben
+            print("erinnerung:", e, file=sys.stderr)
+        return True
+
     # ----- Aufbau -----
     def build(self):
         self.store = st.Store()
         self.store.listeners.append(self.redraw)
+        self.reminders = reminders.Reminders(self.store, lambda t, b, k: reminders.send(self, t, b, k))
+        GLib.timeout_add_seconds(20, self.remind_tick)
+        GLib.timeout_add_seconds(3, lambda: self.remind_tick() and False)       # gleich nach dem Start
+        self.start_background()
+        self.deskcard = deskcard.DeskCard(self)
+        self.store.listeners.append(lambda: self.deskcard.refresh())
+        GLib.timeout_add(1500, lambda: (self.deskcard.apply(), False)[1])     # nach dem ersten Zeichnen
         self.pal = None
         self.cursor = dt.date.today()
         self.slot = self.current_slot()
@@ -1130,9 +1335,9 @@ class Kalender(Gtk.Application):
         self.del_armed = None
 
         if CSS not in tui.CSS:          # im selben Stylesheet wie tui, damit @primary usw. auflösen
-            tui.CSS += CSS
+            tui.CSS += CSS + deskcard.CSS
             tui.Theme.get().load()
-        tabs = [("day", "tag", "󰃭"), ("week", "woche", "󰸗"), ("month", "monat", "󰃰")]
+        tabs = [("day", "tag", "󰃭"), ("week", "woche", "󰸗"), ("month", "monat", "󰃰"), ("agenda", "agenda", "󰃯"), ("tasks", "aufgaben", "󰄬")]
         win = tui.TuiWindow(self, "datist", tabs, size=(1180, 780),
                             hints=(("hjkl", "nav"), ("n", "neu"), ("a", "schnell"), ("t", "heute"), ("?", "hilfe")))
         win.APP_ID = APP_ID
@@ -1147,7 +1352,9 @@ class Kalender(Gtk.Application):
                                       tooltip="Google-Anmeldung abgelaufen (im Testmodus alle 7 Tage) – "
                                               "klicken, um dich im Browser neu anzumelden")
         self.relogin_btn.set_visible(False)
-        for w in (self.relogin_btn, self.sync_badge, self.prev_btn, self.today_btn, self.next_btn, self.kw_badge):
+        self.exam_btn = tui.Button("", self.goto_exam)
+        self.exam_btn.set_visible(False)
+        for w in (self.exam_btn, self.relogin_btn, self.sync_badge, self.prev_btn, self.today_btn, self.next_btn, self.kw_badge):
             win.header_extra.append(w)
         win.add_changelog("datist", os.path.dirname(os.path.realpath(__file__)))
         # Konto & Einstellungen: eigenes Fenster, Knopf rechts neben der Version
@@ -1190,6 +1397,10 @@ class Kalender(Gtk.Application):
             c = Cells(self, v)
             self.views[v] = c
             win.add_page(v, c, scroll=False)
+        self.agenda = agendaview.AgendaView(self)
+        win.add_page("agenda", self.agenda, scroll=False)
+        self.tasksview = agendaview.TasksView(self)
+        win.add_page("tasks", self.tasksview, scroll=False)
         self.build_account()
         # Editor als Ebene über dem Inhalt; darunter 2-Finger-Zurück (swipe.py, Seitenstapel) – endet in der Woche
         # Das Wischen umfasst auch Editor und Hilfe: über einem offenen Termin schließt 2-Finger-Zurück ihn
@@ -1217,13 +1428,17 @@ class Kalender(Gtk.Application):
         self.help.set_visible(False)
         self.help.connect("notify::visible", lambda *_: self.sync_scrim())
         self.overlay.add_overlay(self.help)
+        self.srch = searchview.SearchBox(self)
+        self.srch.set_visible(False)
+        self.srch.connect("notify::visible", lambda *_: self.sync_scrim())
+        self.overlay.add_overlay(self.srch)
         self.apply_see_through()
         self.swipe = swipe.SwipeBack(self.overlay, self.nav_can_back, self.nav_go_back,
                                      where=self.nav_where, target=self.nav_target,
                                      goto=self.nav_goto)
         win.content.append(self.swipe.widget)
         # Schnelleingabe
-        self.quick = tui.Entry("schnell: V Mathe mi 2ds @MA/041 #v !u bis 5.2.   (esc abbrechen)",
+        self.quick = tui.Entry("schnell: V Mathe nächsten mi 14 Uhr für 2h @MA/041 #v !w   (esc abbrechen)",
                                activate=self.quick_add)
         self.quick_rev = Gtk.Revealer(child=hbox(label("󰐕", "accent"), self.quick, spacing=8),
                                       transition_type=Gtk.RevealerTransitionType.SLIDE_UP)
@@ -1248,6 +1463,9 @@ class Kalender(Gtk.Application):
             if kv == Gdk.KEY_Escape:
                 if self.editor.get_visible():
                     self.editor.close()
+                    return True
+                if self.srch.get_visible():
+                    self.srch.close()
                     return True
                 if self.help.get_visible():
                     self.help.set_visible(False)
@@ -1310,7 +1528,7 @@ class Kalender(Gtk.Application):
 
     def apply_see_through(self):
         on = self.store.settings.get("see_through", True)
-        for w in (self.editor, self.help):
+        for w in (self.editor, self.help, self.srch):
             (w.add_css_class if on else w.remove_css_class)("see-through")
         if not getattr(self, "_typing_hook", False):
             self._typing_hook = True
@@ -1323,23 +1541,31 @@ class Kalender(Gtk.Application):
             self.editor.connect("map", lambda w: hooked or hooked.append(w.get_root().connect("notify::focus-widget", focus)))
 
     # ----- 2-Finger-Zurück: Tab-Verlauf, endet immer in der Wochenansicht -----
-    NAV_NAMES = {"day": "¹ tag", "week": "² woche", "month": "³ monat"}
+    NAV_NAMES = {"day": "¹ tag", "week": "² woche", "month": "³ monat", "agenda": "⁴ agenda", "tasks": "⁵ aufgaben"}
 
     def nav_where(self):
         if getattr(self, "editor", None) and self.editor.get_visible():
             return "editor", "termin"
+        if getattr(self, "srch", None) and self.srch.get_visible():
+            return "search", "suche"
         if getattr(self, "help", None) and self.help.get_visible():
             return "help", "hilfe"
         t = self.win.current_tab() if self.win else None
         return t, self.NAV_NAMES.get(t, t or "")
 
+    def overlay_open(self):
+        return (self.editor.get_visible() or self.help.get_visible() or
+                getattr(self, "srch", None) is not None and self.srch.get_visible())
+
     def sync_scrim(self):
-        self.scrim.set_visible(self.editor.get_visible() or self.help.get_visible())
+        self.scrim.set_visible(self.overlay_open())
 
     def dismiss_overlays(self):
         """Wegklicken / 2-Finger-Zurück über Editor oder Hilfe."""
         if self.editor.get_visible():
             self.editor.dismiss()
+        elif self.srch.get_visible():
+            self.srch.close()
         elif self.help.get_visible():
             self.help.set_visible(False)
             self.focus_view()
@@ -1356,7 +1582,7 @@ class Kalender(Gtk.Application):
         self.nav_cur = tid
 
     def nav_can_back(self):
-        return self.editor.get_visible() or self.help.get_visible() or self.win.current_tab() != "week"
+        return self.overlay_open() or self.win.current_tab() != "week"
 
     def _nav_next(self, pop):
         cur = self.win.current_tab()
@@ -1368,7 +1594,7 @@ class Kalender(Gtk.Application):
         return "week"
 
     def nav_target(self):
-        if self.editor.get_visible() or self.help.get_visible():
+        if self.overlay_open():
             t = self.win.current_tab()                # zurück = Editor/Hilfe zu, Ansicht bleibt
             return t, self.NAV_NAMES.get(t, t)
         t = self._nav_next(False)
@@ -1381,7 +1607,7 @@ class Kalender(Gtk.Application):
         return True
 
     def nav_go_back(self):
-        if self.editor.get_visible() or self.help.get_visible():
+        if self.overlay_open():
             self.dismiss_overlays()
             return
         t = self._nav_next(True)
@@ -1392,7 +1618,7 @@ class Kalender(Gtk.Application):
     ZOOM_ORDER = ["day", "week", "month"]
 
     def on_zoom(self, gesture, scale):
-        if getattr(self, "_zoom_done", False) or self.editor.get_visible() or self.help.get_visible():
+        if getattr(self, "_zoom_done", False) or self.overlay_open():
             return
         if 0.8 <= scale <= 1.25:
             return
@@ -1431,7 +1657,7 @@ class Kalender(Gtk.Application):
 
     def open_account(self):
         if self.acct_win is None:
-            w = Gtk.Window(title="datist · konto", transient_for=self.win, modal=False, hide_on_close=True)
+            w = Gtk.Window(application=self, title="datist · konto", transient_for=self.win, modal=False, hide_on_close=True)
             w.add_css_class("pb-window")
             w.add_css_class("tui")
             w.set_default_size(*getattr(tui.glass, "fit_size", lambda a, b: (a, b))(760, 720))
@@ -1476,7 +1702,7 @@ class Kalender(Gtk.Application):
 
     def on_resize(self, w, h):
         """Kopfleiste und Editor an die Fenstergröße anpassen (halber Bildschirm und kleiner)."""
-        compact, tiny = w < 820, w < 520
+        compact, tiny = w < 820, w < 640
         top = self.win.topbar.get_child()
         c = top.get_first_child()
         while c:
@@ -1506,6 +1732,10 @@ class Kalender(Gtk.Application):
         v = self.win.current_tab() if self.win else None
         if v in self.views:
             self.views[v].grab_focus()
+        elif v == "agenda":
+            self.agenda.focus_first()
+        elif v == "tasks":
+            self.tasksview.focus_first()
 
     # ----- Zustand -----
     def current_slot(self):
@@ -1524,9 +1754,56 @@ class Kalender(Gtk.Application):
             return
         for c in self.views.values():
             c.queue_draw()
+        if getattr(self, "agenda", None) is not None:
+            self.agenda.refresh()
+        if getattr(self, "tasksview", None) is not None:
+            self.tasksview.refresh()
         self.update_header()
         if self.acct_open():
             self.refresh_account()
+
+    def update_exam_badge(self):
+        ex = self.store.upcoming("pruefung", 90)
+        self.exam_btn.set_visible(bool(ex))
+        if not ex:
+            return
+        today = dt.date.today()
+        o = ex[0]
+        n = (o["s"].date() - today).days
+        when = "heute" if n <= 0 else "morgen" if n == 1 else f"{n} d"
+        name = re.sub(r"^[!·]:?\s*", "", o["title"])
+        self.exam_btn.set_label(f"! {when}" if self.header_compact else f"! {name[:18]} · {when}")
+        self.exam_btn.set_tooltip_text("Nächste Prüfungen (Klick = zum Termin):\n" + "\n".join(
+            f"{x['s']:%d.%m.} {agendaview.rel_days(x['s'].date(), today)} – {x['title']}" for x in ex[:5]))
+
+    def goto_exam(self):
+        ex = self.store.upcoming("pruefung", 90)
+        if ex:
+            self.cursor = ex[0]["s"].date()
+            self.focus_uid = ex[0].get("uid")
+            self.win.show_tab("day")
+            self.redraw()
+
+    # Zuerst ausgeblendet, wenn die Kopfzeile nicht passt (Zahnrad, Version, ✕ und die Tabs bleiben immer)
+    HEADER_DROP = ("kw_badge", "sync_badge", "exam_btn", "today_btn", "next_btn", "prev_btn")
+
+    def fit_header(self):
+        """Kopfzeile an die Fensterbreite anpassen: lieber Nebensächliches weglassen, als rechts etwas abzuschneiden
+        (dort sitzen Einstellungen und Schließen)."""
+        w = self.win.get_width() if self.win else 0
+        if w <= 0:
+            return
+        for x in getattr(self, "_hdr_hidden", []):
+            x.set_visible(True)
+        self._hdr_hidden = []
+        top = self.win.topbar
+        for name in self.HEADER_DROP:
+            if top.measure(Gtk.Orientation.HORIZONTAL, -1)[1] <= w - 24:
+                break
+            x = getattr(self, name, None)
+            if x is not None and x.get_visible():
+                x.set_visible(False)
+                self._hdr_hidden.append(x)
 
     def update_header(self):
         d = self.cursor
@@ -1537,13 +1814,19 @@ class Kalender(Gtk.Application):
             self.kw_badge.set_label(f"KW {raster.kw(d)} · {'gerade' if even else 'ungerade'}")
         self.kw_badge.set_css_classes(["kw-badge", "even" if even else "odd"])
         n = len(self.store.pending)
+        self.update_exam_badge()
         exp = gcal.logged_in() and gcal.expired()
-        self.relogin_btn.set_visible(exp)
+        soon = self.expiry_soon()
+        self.relogin_btn.set_visible(exp or soon is not None)
         self.relogin_btn.set_sensitive(self.login is None)
         if self.login is not None:
             self.relogin_btn.set_label("… browser" if self.header_compact else "… warte auf browser")
-        else:
+        elif exp:
             self.relogin_btn.set_label("⚠" if self.header_compact else "⚠ neu anmelden")
+        else:
+            h = max(0, int((soon or 0) // 3600))
+            self.relogin_btn.set_label("⏳" if self.header_compact else f"⏳ erneuern (noch {h} h)")
+            self.relogin_btn.set_tooltip_text("Die Google-Anmeldung läuft bald ab (Testmodus, 7 Tage) – ein Klick erneuert sie")
         if self.syncing:
             s = "⟳ gleiche ab …"
         elif exp:
@@ -1565,13 +1848,18 @@ class Kalender(Gtk.Application):
         if self.header_compact and not s.startswith("✓"):
             s = s.split(" ")[0]                  # schmal: nur das Symbol, Text im Tooltip (Uhrzeit bleibt)
         self.sync_badge.set_label(s)
+        self.fit_header()
 
     # ----- Abgleich -----
     def sync(self, force=False):
+        self.refresh_subs(force=force)               # ICS-Abos laufen unabhängig von Google mit
+        if self.syncing and gcal.logged_in():
+            self._resync = True                      # Änderung während eines Abgleichs: gleich danach noch einmal
+            return False
         if self.syncing or not gcal.logged_in() or not gcal.client():
             self.update_header()
             return False
-        if gcal.expired():                       # nicht ständig gegen die abgelaufene Anmeldung laufen
+        if not gcal.active_accounts():           # nicht ständig gegen abgelaufene Anmeldungen laufen
             if force:
                 self.win.say("Google-Anmeldung abgelaufen – oben auf „⚠ neu anmelden“ klicken", error=True)
             self.update_header()
@@ -1590,6 +1878,9 @@ class Kalender(Gtk.Application):
 
         def done(res):
             self.syncing = False
+            if getattr(self, "_resync", False):
+                self._resync = False
+                GLib.timeout_add(400, lambda: self.sync() and False)
             if isinstance(res, gcal.ExpiredError):
                 self.win.say("Google-Anmeldung abgelaufen (Testmodus: alle 7 Tage) – oben auf „⚠ neu anmelden“ "
                              "klicken. Änderungen bleiben gespeichert.", error=True)
@@ -1602,6 +1893,9 @@ class Kalender(Gtk.Application):
             else:
                 self.store.apply_sync(res)
                 self.last_errors = res.get("errors", [])
+                if res.get("expired"):
+                    who = ", ".join(self.acct_name(a) for a in res["expired"])
+                    self.last_errors.insert(0, f"Anmeldung abgelaufen: {who} – oben „⚠ neu anmelden“")
                 if not res.get("offline") and res.get("events") is not None:
                     # ältere datist-Termine haben in Google noch keine Farbe (blau) → einmal nachziehen
                     fixed = self.store.color_fixes(skip=self._color_tried)
@@ -1616,11 +1910,12 @@ class Kalender(Gtk.Application):
                     self.win.say("abgeglichen")
             self.update_header()
             self.redraw()
-        tui.background(gcal.sync, pend, window, done=done)
+        tui.background(gcal.sync, pend, window, dict(self.store.settings.get("accounts", {})), self.store.tasks_on(),
+                       done=done)
         return False
 
     def after_edit(self, msg):
-        self.win.say(msg)
+        self.win.say(msg + ("   ·   u = rückgängig" if self.store.can_undo() else ""))
         self.redraw()
         if gcal.logged_in():
             GLib.timeout_add(800, lambda: self.sync() and False)
@@ -1641,7 +1936,8 @@ class Kalender(Gtk.Application):
             self.render_month(g, cols, rows)
 
     def occ(self, a, b):
-        return self.store.occurrences(dt.datetime.combine(a, dt.time()), dt.datetime.combine(b, dt.time()))
+        return self.store.mark_conflicts(
+            self.store.occurrences(dt.datetime.combine(a, dt.time()), dt.datetime.combine(b, dt.time())))
 
     @staticmethod
     def clock(d):
@@ -1735,12 +2031,25 @@ class Kalender(Gtk.Application):
             icons += "↻"
         short = CAT_SHORT.get(o.get("cat"), "○")
         title = o["title"] if o["title"].split(" ", 1)[0] in (short, short + ":", "VL", "Ü:", "V:") else f"{short} {o['title']}"
+        if o.get("conflict"):
+            icons += "⚡"
         if icons:
             title += " " + icons
         lines = [title]
         if o.get("location"):
             lines.append("⌂ " + o["location"])
         lines.append(self.span_text(o) or f"{self.clock(o['s'])}–{self.clock(o['e'])}")
+        if o.get("conflict"):
+            lines.append("⚡ überschneidet: " + ", ".join(dict.fromkeys(o["conflict"])))
+        if o.get("meet"):
+            lines.append("󰍬 Meet")
+        if o.get("tz") and not o.get("allday"):
+            try:
+                z = ZoneInfo(o["tz"])
+                a = o["s"].replace(tzinfo=TZ).astimezone(z)
+                lines.append(f"󰖟 {a:%H:%M} {a.tzname()}")
+            except Exception:  # noqa: BLE001
+                pass
         if o.get("link"):
             lines.append("󰂚 notist" if o["link"].startswith(st.NOTIST_LINK) else
                          "󰌹 " + re.sub(r"^https?://(www\.)?", "", o["link"]))
@@ -1759,11 +2068,16 @@ class Kalender(Gtk.Application):
                 g.text(c + 1, r + 1 + i, line, p.fg if i == 0 else col, 1.0 if i == 0 else 0.95, maxw=inner)
             if selected:
                 g.text(c, r, "┏", col)
+            if o.get("conflict"):                       # Überschneidung: Blitz in der Rahmenecke (immer sichtbar)
+                g.erase(c + w - 3, r, 2)
+                g.text(c + w - 3, r, "⚡", p.tones["alert"])
         else:
             for i in range(h):
                 g.text(c, r + i, "▌", col)
             for i, line in enumerate(lines[:h]):
                 g.text(c + 1, r + i, line, p.fg if i == 0 else col, maxw=w - 1)
+            if o.get("conflict") and w >= 3:
+                g.text(c + w - 2, r, "⚡", p.tones["alert"])
 
     # ----- Woche -----
     def week_days(self, cols=None, gut=8):
@@ -1832,6 +2146,10 @@ class Kalender(Gtk.Application):
         even = kwn % 2 == 0
         par_col = p.primary if even else p.tones["tertiary"]
         title = f"KW {kwn} ◆ {'gerade' if even else 'ungerade'}" if width >= 30 else f"KW {kwn} {'g' if even else 'u'}"
+        wk = [d for d in days if d.weekday() < 5]
+        wstate = self.store.week_state(wk) if wk else None
+        if wstate in ("frei", "pruefung") and width >= 44:
+            title += "  ·  " + ("vorlesungsfrei" if wstate == "frei" else "prüfungsphase")
         if nd >= 5:
             last = days[-1]
             rng = f"{a.day}.{'' if a.month == last.month else f'{a.month}.'}–{last.day}. {MONTHS[last.month - 1]} {last.year}"
@@ -1854,9 +2172,12 @@ class Kalender(Gtk.Application):
             if nd == 1 and width >= 24:
                 lab = f"{WEEKDAYS_LONG[d.weekday()]} {d.day}.{d.month}."
             x = c + 1 + max(0, (dw - 1 - len(lab)) // 2)
+            hname = self.store.day_state(d)
             if d == today:
                 g.fill(c + 1, 1, dw - 1, 1, p.primary, 1.0)
                 g.text(x, 1, lab, p.on_primary, maxw=dw - 1)
+            elif hname:                                 # Feiertag: Tag in der Warnfarbe, Name im Tooltip der Region
+                g.text(x, 1, lab, p.tones["tertiary"], 1.0, maxw=dw - 1)
             else:
                 g.text(x, 1, lab, p.fg, 0.55 if d.weekday() >= 5 else 1.0, maxw=dw - 1)
             if d == self.cursor and d != today and nd > 1:
@@ -2254,6 +2575,8 @@ class Kalender(Gtk.Application):
                         g.text(c + cw, rr, "┃", sig)
                     if cw >= 13:
                         g.text(nx + 3, body, f"{now:%H:%M}", sig)
+                elif self.store.day_state(d):                       # Feiertag: Zahl in der Warnfarbe
+                    g.text(nx, body, num, p.tones["tertiary"], al)
                 else:
                     g.text(nx, body, num, p.fg, al * (0.6 if d.weekday() >= 5 else 1.0))
                 evs = by_day.get(d, [])
@@ -2291,6 +2614,9 @@ class Kalender(Gtk.Application):
 
     def on_hit(self, view, hit, n, button):
         kind = hit[0]
+        if kind == "event" and hit[1].get("cal") == "tasks":
+            self.toggle_task(hit[1])                 # Aufgabe anklicken = abhaken / wieder öffnen
+            return
         if kind == "event":
             o = hit[1]
             self.focus_uid = o["uid"]
@@ -2326,6 +2652,61 @@ class Kalender(Gtk.Application):
             dur = o["e"] - o["s"]
             ev["start"], ev["end"] = st.iso(o["s"], o.get("allday")), st.iso(o["s"] + dur, o.get("allday"))
         self.editor.open(ev, orig=o)
+
+    def move_event(self, o, tgt):
+        """Termin o (Anzeige-Instanz) auf das Ziel tgt (dragmove.target_at) verschieben; die Dauer bleibt."""
+        if self.store.is_readonly(o):
+            self.win.say("nur lesbar – lässt sich nicht verschieben", error=True)
+            return
+        d, ds = tgt["day"], tgt.get("ds")
+        allday = bool(o.get("allday"))
+        dur = o["e"] - o["s"]
+        long_ = allday or dur >= dt.timedelta(hours=20)
+        if ds is not None and not long_:
+            ns = dt.datetime.combine(d, raster.ds_times(ds + 1)[0])        # auf den Beginn der Doppelstunde
+        else:
+            ns = dt.datetime.combine(d, o["s"].time())                      # nur den Tag wechseln
+        if ns == o["s"]:
+            return
+        ev = {k: v for k, v in o.items() if k not in ("s", "e", "occ", "conflict")}
+        ev["start"], ev["end"] = st.iso(ns, allday), st.iso(ns + dur, allday)
+        scope = "instance" if (o.get("series") or o.get("rrule")) else "single"
+        try:
+            self.store.save_event(ev, scope=scope, original=o)
+        except ValueError as e:
+            self.win.say(str(e), error=True)
+            return
+        self.cursor = d
+        when = f"{WEEKDAYS[ns.weekday()]} {ns.day}.{ns.month}." + ("" if allday else f" {ns:%H:%M}")
+        self.focus_uid = o.get("uid")
+        self.after_edit(f"verschoben: {o.get('title')} → {when}")
+
+    def toggle_task(self, o):
+        tid, done = o.get("task_id"), not o.get("done")
+        self.store.set_task_done(tid, done)
+        self.win.say(("☑ erledigt: " if done else "☐ wieder offen: ") + o["title"][2:])
+        self.redraw()
+        if gcal.logged_in():
+            GLib.timeout_add(800, lambda: self.sync() and False)
+
+    def resize_event(self, o, tgt):
+        """Dauer ändern: neues Ende aus dragmove.resize_target_at (Ende einer Doppelstunde)."""
+        if self.store.is_readonly(o):
+            self.win.say("nur lesbar – lässt sich nicht ändern", error=True)
+            return
+        end = tgt["end"]
+        if end == o["e"]:
+            return
+        ev = {k: v for k, v in o.items() if k not in ("s", "e", "occ", "conflict")}
+        ev["start"], ev["end"] = st.iso(o["s"], False), st.iso(end, False)
+        scope = "instance" if (o.get("series") or o.get("rrule")) else "single"
+        try:
+            self.store.save_event(ev, scope=scope, original=o)
+        except ValueError as e:
+            self.win.say(str(e), error=True)
+            return
+        self.focus_uid = o.get("uid")
+        self.after_edit(f"Dauer geändert: {o.get('title')} → bis {end:%H:%M}")
 
     def after_move(self):
         self.store.settings["cursor"] = self.cursor.isoformat()
@@ -2415,6 +2796,21 @@ class Kalender(Gtk.Application):
         view = self.win.current_tab()
         if view == "acct":
             return False
+        if view == "agenda" and not state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
+            if kv in (Gdk.KEY_j, Gdk.KEY_Down):
+                self.agenda.move(1)
+                return True
+            if kv in (Gdk.KEY_k, Gdk.KEY_Up):
+                self.agenda.move(-1)
+                return True
+            if kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+                return False                       # der fokussierte Termin-Knopf öffnet sich selbst
+            if kv in (Gdk.KEY_h, Gdk.KEY_l, Gdk.KEY_H, Gdk.KEY_L, Gdk.KEY_Left, Gdk.KEY_Right):
+                return True
+        if state & Gdk.ModifierType.CONTROL_MASK and not state & Gdk.ModifierType.ALT_MASK \
+                and kv in (Gdk.KEY_z, Gdk.KEY_Z):
+            self.undo()
+            return True
         if state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK):
             return False
         ch = Gdk.keyval_to_unicode(kv)
@@ -2446,6 +2842,8 @@ class Kalender(Gtk.Application):
                 self.after_move()
             else:
                 self.move_day(d * (1 if view == "day" else 7))
+        elif k == "b":
+            self.toggle_desk()
         elif k == "d":
             self.win.show_tab("day")
         elif k == "w":
@@ -2476,6 +2874,10 @@ class Kalender(Gtk.Application):
             self.sync(force=True)
         elif k == "g":
             self.open_quick(goto=True)
+        elif k == "/":
+            self.srch.open()
+        elif k == "u":
+            self.undo()
         elif k == "?":
             self.help.set_visible(not self.help.get_visible())
         elif k == "+" or k == "-":
@@ -2487,9 +2889,19 @@ class Kalender(Gtk.Application):
             return False
         return True
 
+    def undo(self):
+        ok_, msg = self.store.undo()
+        self.win.say(msg + ("   ·   u noch einmal für den davor" if ok_ and self.store.can_undo() else ""))
+        self.redraw()
+        if ok_ and gcal.logged_in():
+            GLib.timeout_add(800, lambda: self.sync() and False)
+
     def delete_focused(self):
         o = self.focused()
         if not o:
+            return
+        if self.store.is_readonly(o):
+            self.win.say(f"„{o['title']}“ ist nur lesbar (Abo oder Kalender ohne Schreibrecht)", error=True)
             return
         if self.del_armed != o["uid"]:
             self.del_armed = o["uid"]
@@ -2508,7 +2920,7 @@ class Kalender(Gtk.Application):
     def open_quick(self, goto=False):
         self.quick_goto = goto
         self.quick.set_placeholder_text("gehe zu: heute, mi, +2w, 20.10., 2027-01-15" if goto else
-                                        "schnell: V Mathe mi 2ds @MA/041 #v !u bis 5.2.   (esc abbrechen)")
+                                        "schnell: V Mathe nächsten mi 14 Uhr für 2h @MA/041 #v !w   (esc abbrechen)")
         self.quick.set_text("")
         self.quick_rev.set_reveal_child(True)
         GLib.idle_add(lambda: self.quick.grab_focus() and False)
@@ -2550,59 +2962,7 @@ class Kalender(Gtk.Application):
                         + (f" · {rrule.describe(ev['rrule'], st.parse_when(ev['start'], False))}" if ev.get("rrule") else ""))
 
     def parse_quick(self, text):
-        day, t_from, t_to, ds = self.cursor, None, None, None
-        loc, link, cat, rule, until = "", "", "", None, None
-        words = []
-        toks = text.split()
-        i = 0
-        cats = {"v": "vorlesung", "vl": "vorlesung", "ü": "uebung", "ue": "uebung", "s": "seminar", "p": "praktikum",
-                "prak": "praktikum", "!": "pruefung", "prüf": "pruefung", "pr": "pruefung", "k": "pruefung",
-                "privat": "privat", "priv": "privat", "x": "sonst"}
-        rules = {"!w": "weekly", "!g": "even", "!u": "odd", "!kg": "kweven", "!ku": "kwodd", "!m": "monthly",
-                 "!t": "daily", "!j": "yearly"}
-        while i < len(toks):
-            t = toks[i]
-            tl = t.lower()
-            m_ds = re.fullmatch(r"(\d)\.?(?:-(\d)\.?)?\s*ds", tl) or re.fullmatch(r"ds(\d)(?:-(\d))?", tl)
-            m_t = re.fullmatch(r"(\d{1,2}(?::\d{2})?)-(\d{1,2}(?::\d{2})?)", tl)
-            if m_ds:
-                a, b = int(m_ds.group(1)), int(m_ds.group(2) or m_ds.group(1))
-                if not (1 <= a <= 7 and 1 <= b <= 7):
-                    raise ValueError("DS 1–7")
-                t_from, t_to = raster.ds_times(a)[0], raster.ds_times(b)[1]
-            elif m_t:
-                t_from, t_to = raster.parse_time(m_t.group(1)), raster.parse_time(m_t.group(2))
-            elif t.startswith("@") and len(t) > 1:
-                loc = t[1:]
-            elif t.startswith("#") and tl[1:] in cats:
-                cat = cats[tl[1:]]
-            elif tl in rules:
-                rule = rules[tl]
-            elif tl == "bis" and i + 1 < len(toks):
-                until = raster.parse_date(toks[i + 1])
-                i += 1
-            elif re.match(r"https?://|www\.", tl):
-                link = t
-            else:
-                try:
-                    if re.fullmatch(r"heute|morgen|übermorgen|[+-]\d+[dtw]?|\d{1,2}\.\d{1,2}\.?\d{0,4}|"
-                                    r"(mo|di|mi|do|fr|sa|so)|montag|dienstag|mittwoch|donnerstag|freitag|samstag|sonntag",
-                                    tl):
-                        day = raster.parse_date(tl)
-                    else:
-                        words.append(t)
-                except ValueError:
-                    words.append(t)
-            i += 1
-        title = " ".join(words) or "(ohne Titel)"
-        if t_from is None:
-            t_from, t_to = raster.ds_times(self.slot + 1)
-        s, e = dt.datetime.combine(day, t_from), dt.datetime.combine(day, t_to)
-        if e <= s:
-            e = s + dt.timedelta(minutes=90)
-        ev = {"cal": self.store.default_cal(), "title": title, "allday": False, "start": st.iso(s), "end": st.iso(e),
-              "location": loc, "link": link, "notes": "", "cat": cat or raster.guess_cat(title), "tone": "", "rrule": None}
-        return ev, rule, until
+        return quickparse.parse(text, self.cursor, raster.ds_times(self.slot + 1), self.store.default_cal())
 
     # =================================================================
     # Hilfe & Konto
@@ -2610,16 +2970,19 @@ class Kalender(Gtk.Application):
     def build_help(self):
         rows = [("h j k l / ←↓↑→", "Tag bzw. Doppelstunde wechseln (Monat: Tag/Woche)"),
                 ("H L / [ ]", "voriger/nächster Zeitraum"), ("d w m", "Tag-, Wochen-, Monatsansicht"),
-                ("t", "heute"), ("g", "gehe zu Datum"), ("n", "neuer Termin im markierten DS"),
+                ("t", "heute"), ("b", "Termine auf dem Hintergrundbild ein/aus"), ("g", "gehe zu Datum"), ("/", "suchen (Titel, Ort, Notiz)"), ("n", "neuer Termin im markierten DS"),
                 ("a", "Schnelleingabe:  V Mathe mi 2ds @MA/041 #v !u bis 5.2."),
                 ("⏎ / e", "markierten Termin bearbeiten"), ("tab", "nächster Termin des Tages"),
-                ("x x", "Termin löschen"), ("s / strg+r", "mit Google abgleichen"), ("+ −", "Schrift größer/kleiner"),
+                ("4", "Agenda: die nächsten 7/14/30 Tage (j k wählen, ⏎ öffnen)"), ("x x", "Termin löschen"), ("u / strg+z", "letzte Änderung rückgängig (Serien bei Google nicht)"), ("s / strg+r", "mit Google abgleichen"), ("+ −", "Schrift größer/kleiner"),
                 ("1–3", "Tag / Woche / Monat"), ("esc", "schließen"),
                 ("2 finger ← / maus 8", "zurück (endet in der Woche)"),
                 ("2 finger zoom", "zusammen: Tag → Woche → Monat · auseinander: zurück"),
                 ("klick", "Termin öffnen · Wochentag → Tagesansicht · KW / Tageszahl im Monat → Woche / Tag"),
                 ("✓ 12:34 (oben)", "letzter Google-Abgleich – klicken = jetzt abgleichen")]
-        quick = [("2ds  2-3ds  14-16", "Zeit: Doppelstunde(n) oder Uhrzeit"), ("mi  morgen  +3  20.10.", "Tag"),
+        quick = [("2ds  2-3ds  14-16  14 Uhr  2pm", "Zeit: Doppelstunde(n) oder Uhrzeit (um 14 Uhr, von 14 bis 16)"),
+                 ("für 2h  90min  ganztägig", "Dauer bzw. ganztägig"),
+                 ("mi  morgen  +3  20.10.", "Tag"),
+                 ("nächsten mo  in 2 wochen  next fri", "Tag, auch übernächsten, nächste Woche, in 3 Tagen, English"),
                  ("@MA/041", "Ort"), ("#v #ü #s #p #! #privat", "Typ"),
                  ("!w !g !u !kg !ku !m", "wöchentl., 2-wö. gerade/ungerade, jede gerade/ungerade KW, monatl."),
                  ("bis 5.2.", "Serienende"), ("https://…", "Link")]
@@ -2639,7 +3002,28 @@ class Kalender(Gtk.Application):
     def build_account(self):
         self.acct = vbox(spacing=8)
         self.acct.set_margin_top(4)
-        self.acct.append(tui.theme_panel())
+        self.acct_stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=90,
+                                    vhomogeneous=False, hhomogeneous=True)
+        pages = {}
+        tabrow = hbox(spacing=2)
+        tabrow.add_css_class("topbar")
+        group = None
+        self.acct_tabs = {}
+        for pid, name in ACCT_PAGES:
+            pages[pid] = vbox(spacing=8)
+            self.acct_stack.add_named(pages[pid], pid)
+            b = Gtk.ToggleButton()
+            b.add_css_class("tab")
+            b.set_child(label(name))
+            if group:
+                b.set_group(group)
+            group = group or b
+            b.connect("toggled", lambda b, pid=pid: b.get_active() and self.acct_stack.set_visible_child_name(pid))
+            self.acct_tabs[pid] = b
+            tabrow.append(b)
+        self.acct.append(tabrow)
+        self.acct.append(self.acct_stack)
+        pages["allgemein"].append(tui.theme_panel())
         # Google
         self.g_panel = tui.Panel("google kalender")
         self.g_status = label("", markup=True, wrap=True)
@@ -2648,16 +3032,21 @@ class Kalender(Gtk.Application):
         self.g_panel.body.append(self.g_status)
         self.g_panel.body.append(self.g_steps)
         self.g_panel.body.append(self.g_btns)
-        self.acct.append(self.g_panel)
+        pages["google"].append(self.g_panel)
+        pages["google"].append(self.build_accounts_panel())
+        pages["google"].append(self.build_tasks_panel())
+        pages["leiste"].append(self.build_bar_panel())
         self.c_panel = tui.Panel("kalender")
         self.c_list = vbox(spacing=2)
         self.c_panel.body.append(self.c_list)
-        self.acct.append(self.c_panel)
+        pages["google"].append(self.c_panel)
+        pages["kalender"].append(self.build_subs_panel())
+        pages["kalender"].append(self.build_ics_panel())
         self.f_panel = tui.Panel("farben · aus dem design")
         self.f_area = Gtk.DrawingArea(content_height=60, hexpand=True)
         self.f_area.set_draw_func(self.draw_legend)
         self.f_panel.body.append(self.f_area)
-        self.acct.append(self.f_panel)
+        pages["allgemein"].append(self.f_panel)
         self.v_panel = tui.Panel("darstellung")
         self.v_week = tui.Check("wochenende in der wochenansicht", self.store.settings.get("weekend", True),
                                 lambda on: (self.store.settings.__setitem__("weekend", on), self.store.save_settings(),
@@ -2666,17 +3055,90 @@ class Kalender(Gtk.Application):
                                lambda on: (self.store.settings.__setitem__("see_through", on), self.store.save_settings(),
                                            self.apply_see_through()))
         self.v_panel.body.append(wrapbox(self.v_week, self.v_see, label("schrift: + / − in den ansichten", "dim")))
-        self.acct.append(self.v_panel)
+        pages["allgemein"].append(self.v_panel)
+        self.d_panel = tui.Panel("termine auf dem hintergrundbild")
+        self.v_desk = tui.Check("termine auf dem hintergrundbild", self.store.settings.get("desk", False),
+                                self.set_desk, tooltip="Karte mit den nächsten Terminen dauerhaft auf dem Desktop, unter "
+                                                       "allen Fenstern. Braucht Wayland mit layer-shell (Hyprland, Sway …).")
+        self.v_desk_pos = tui.Select(self.set_desk_pos, tooltip="Wo auf dem Bildschirm")
+        self.v_desk_pos.set_options(deskcard.POSITIONS, self.store.settings.get("desk_pos", "top-left"))
+        self.d_panel.body.append(wrapbox(self.v_desk, self.v_desk_pos))
+        if not deskcard.supported():
+            self.v_desk.set_sensitive(False)
+            self.v_desk_pos.set_sensitive(False)
+            self.d_panel.body.append(label("hier nicht verfügbar: braucht gtk4-layer-shell und einen Wayland-Compositor "
+                                           "mit layer-shell.", "dim", wrap=True))
+        self.d_panel.body.append(label("Ein-/Ausschalten per Tastenkürzel: Super+Shift+K, in datist die Taste b oder im Terminal "
+                                       "„datist --desk“.", "dim", wrap=True))
+        pages["leiste"].append(self.d_panel)
+        self.r_panel = tui.Panel("erinnerungen")
+        self.r_on = tui.Check("desktop-meldung vor Terminen", self.store.settings.get("remind_on", True),
+                              lambda on: (self.store.settings.__setitem__("remind_on", on), self.store.save_settings()),
+                              tooltip="Läuft, solange datist im Hintergrund ist (startet beim Login).")
+        self.r_def = tui.Entry("", width=10, text=reminders.fmt_lead(self.reminders.default_lead()),
+                               activate=lambda: self.set_remind_default())
+        self.r_def.connect("changed", lambda *_: self.r_msg.set_label(""))
+        self.r_msg = label("", "warn")
+        self.r_panel.body.append(wrapbox(self.r_on, label("standard-vorlauf", "dim"), self.r_def,
+                                         tui.Button("übernehmen", self.set_remind_default),
+                                         tui.Button("test-meldung", lambda: reminders.send(
+                                             self, "in 10 min: Testtermin", "so sieht eine Erinnerung aus", "test"))))
+        self.r_panel.body.append(label("im Termin lässt sich der Vorlauf einzeln ändern (z. B. 30 min, 2 h, 1 tag, keine). "
+                                       "ganztägige Termine melden nur, wenn dort ein Vorlauf steht.", "dim", wrap=True))
+        self.r_panel.body.append(self.r_msg)
+        pages["erinnerungen"].append(self.r_panel)
         self.s_panel = tui.Panel("semester · vorlesungszeit")
+        self.s_state = tui.Select(self.set_holiday_state, max_chars=26, tooltip="Gesetzliche Feiertage dieses Landes")
+        self.s_state.set_options(holidays.STATES, self.store.settings.get("holiday_state", ""))
+        self.s_panel.body.append(wrapbox(label("feiertage für", "dim"), self.s_state,
+                                         label("(Kalender „Feiertage & Semester“ oben ein-/ausblendbar)", "dim")))
         self.s_list = vbox(spacing=2)
         self.s_panel.body.append(self.s_list)
+        self.s_panel.body.append(label(
+            "für „ganzes semester“ im termin – A = 1. woche (ungerade KW), B = 2. woche (gerade KW). Aus diesen Zeiten "
+            "kommen Vorlesungsbeginn/-ende, freie Tage und „vorlesungsfrei“ in der Wochenansicht; optional je Semester "
+            "\"exams\": [[\"2027-02-08\", \"2027-03-12\"]] für die Prüfungsphase.", "dim", wrap=True, xalign=0))
         self.s_panel.body.append(wrapbox(
-            label("für „ganzes semester“ im termin – A = 1. woche (ungerade KW), B = 2. woche (gerade KW)", "dim"),
             tui.Button("zeiten bearbeiten", self.edit_semesters,
                        tooltip=f"öffnet {raster.SEMESTER_FILE.replace(os.path.expanduser('~'), '~')}")))
-        self.acct.append(self.s_panel)
+        pages["kalender"].append(self.s_panel)
         self.refresh_account()
         return self.acct
+
+    def set_desk(self, on):
+        self.store.settings["desk"] = bool(on)
+        self.store.save_settings()
+        self.deskcard.apply()
+        chk = getattr(self, "v_desk", None)
+        if chk is not None and chk.active != bool(on):
+            chk.set_active(bool(on))
+
+    def toggle_desk(self):
+        self.set_desk(not self.store.settings.get("desk", False))
+        if self.win:
+            self.win.say("termine auf dem hintergrundbild: " + ("an" if self.store.settings["desk"] else "aus"))
+
+    def set_desk_pos(self, v):
+        self.store.settings["desk_pos"] = v
+        self.store.save_settings()
+        self.deskcard.apply()
+
+    def set_holiday_state(self, v):
+        self.store.settings["holiday_state"] = v
+        self.store.save_settings()
+        self.redraw()
+
+    def set_remind_default(self):
+        try:
+            v = reminders.parse_lead(self.r_def.get_text())
+        except ValueError as e:
+            self.r_msg.set_label(f"✗ {e}")
+            return
+        v = reminders.DEFAULT_LEAD if v is None else max(0, v)
+        self.store.settings["remind_default"] = v
+        self.store.save_settings()
+        self.r_def.set_text(reminders.fmt_lead(v))
+        self.r_msg.set_label(f"✓ standard: {reminders.fmt_lead(v)}")
 
     def draw_legend(self, area, cr, w, h):
         p = Palette()
@@ -2700,11 +3162,15 @@ class Kalender(Gtk.Application):
         area.set_content_height(y + 30)
 
     def refresh_account(self):
+        self.refresh_ics_panel()
+        self.refresh_accounts_panel()
+        self.refresh_tasks_panel()
+        self.refresh_bar_panel()
         tui.clear(self.g_steps)
         tui.clear(self.g_btns)
         has_client = bool(gcal.client())
-        logged = gcal.logged_in()
-        if logged and gcal.expired():
+        logged = gcal.logged_in(gcal.MAIN)
+        if logged and gcal.expired(gcal.MAIN):
             n = len(self.store.pending)
             self.g_status.set_markup(
                 f"<span foreground='{self.hex('tertiary')}'>⚠ Anmeldung abgelaufen</span> – im Testmodus lässt Google "
@@ -2721,13 +3187,18 @@ class Kalender(Gtk.Application):
             valid = ""
             if since:
                 a = dt.datetime.fromtimestamp(since)
-                valid = f" · angemeldet am {a:%d.%m.} (im Testmodus gültig bis {a + dt.timedelta(days=7):%d.%m. %H:%M})"
+                left = gcal.seconds_left() or 0
+                rest = f"noch {left / 86400:.1f} Tage" if left >= 86400 else f"noch {max(0, int(left // 3600))} Std."
+                valid = f" · angemeldet am {a:%d.%m.} (Testmodus: gültig bis {a + dt.timedelta(days=7):%d.%m. %H:%M}, {rest})"
             self.g_status.set_markup(f"<span foreground='{self.hex('primary')}'>●</span> angemeldet · zuletzt "
                                      f"abgeglichen {when} · {n} änderung{'en' if n != 1 else ''} offen{valid}")
             for e in self.last_errors[:3]:
                 self.g_steps.append(label("✗ " + e, "warn", wrap=True))
             self.g_btns.set_layout_manager(WrapLayout(spacing=8))
             self.g_btns.append(tui.Button("jetzt abgleichen", lambda: self.sync(force=True)))
+            self.g_btns.append(tui.Button("anmeldung erneuern", self.start_login,
+                                          tooltip="Fängt die 7 Tage neu an – am besten kurz vor dem Ablauf, dann bricht "
+                                                  "der Abgleich nie ab"))
             self.g_btns.append(tui.Button("farben an google übertragen", self.push_colors,
                                           tooltip="alle in datist angelegten Termine bekommen in Google die "
                                                   "passende Farbe (nächste der 11 Google-Farben)"))
@@ -2802,7 +3273,7 @@ class Kalender(Gtk.Application):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as f:
                 json.dump([{"name": s["name"], "start": s["start"].isoformat(), "end": s["end"].isoformat(),
-                            "free": [[a.isoformat(), b.isoformat()] for a, b in s["free"]]}
+                            "free": [[a.isoformat(), b.isoformat()] for a, b in s["free"]], "exams": []}
                            for s in raster.semesters()], f, ensure_ascii=False, indent=1)
         Gio.AppInfo.launch_default_for_uri(Gio.File.new_for_path(path).get_uri(), None)
 
@@ -2853,9 +3324,17 @@ class Kalender(Gtk.Application):
             self.refresh_account()
         dlg.open(self.win, None, done)
 
-    def start_login(self):
+    def acct_name(self, acct):
+        """Anzeigename eines Kontos (nie die E-Mail): vom Nutzer vergeben, das Hauptkonto heißt „Google“."""
+        return self.store.settings.get("accounts", {}).get(acct) or ("Google" if acct == gcal.MAIN else acct)
+
+    def start_login(self, acct=None, tasks=False):
+        if acct is None or not isinstance(acct, str):          # Klick im Kopf: das erste abgelaufene Konto
+            exp = gcal.expired_accounts()
+            acct = exp[0] if exp else (getattr(self, "_expiry_acct", None) or gcal.MAIN)
         self.login = gcal.Login(lambda url: GLib.idle_add(
-            lambda: Gio.AppInfo.launch_default_for_uri(url, None) and False))
+            lambda: Gio.AppInfo.launch_default_for_uri(url, None) and False), acct, tasks)
+        self.login_acct = acct
         self.win.say("Browser geöffnet – bei Google anmelden und Zugriff erlauben")
         self.refresh_account()
         self.update_header()
@@ -2866,6 +3345,9 @@ class Kalender(Gtk.Application):
                 self.win.say(f"Anmeldung: {res}", error=True)
             else:
                 self.win.say("angemeldet ✓ – gleiche ab …")
+                if tasks:
+                    self.store.settings["tasks_on"] = True
+                    self.store.save_settings()
                 self.store.window = None
                 self.sync(force=True)
             self.refresh_account()
@@ -2876,18 +3358,26 @@ class Kalender(Gtk.Application):
         if self.login:
             self.login.cancelled = True
 
-    def logout(self):
-        gcal.logout()
-        self.store.google = {}
-        self.store.calendars = []
-        self.store.synced = None
-        self.store.save_cache()
-        self.win.say("abgemeldet – Google-Termine aus dem Cache entfernt, lokale bleiben")
+    def logout(self, acct=None):
+        acct = acct or gcal.MAIN
+        gcal.logout(acct)
+        self.store.drop_account(acct)
+        self.win.say("abgemeldet – Google-Termine dieses Kontos aus dem Cache entfernt, lokale bleiben")
         self.refresh_account()
         self.redraw()
 
 
 if __name__ == "__main__":
+    if "--desk" in sys.argv:                 # datist --desk: läuft nichts, Karte umschalten und im Hintergrund starten
+        sys.argv.remove("--desk")
+        app = Kalender()
+        app.register(None)
+        if app.get_is_remote():
+            app.activate_action("toggle-desk", None)
+            sys.exit(0)
+        app.daemon = True
+        app.connect("startup", lambda a: GLib.idle_add(lambda: (a.toggle_desk(), False)[1]))
+        sys.exit(app.run([sys.argv[0]]))
     if "--tab" in sys.argv:                  # datist --tab acct: direkt einen Tab zeigen (z. B. aus scourge)
         tab = sys.argv[sys.argv.index("--tab") + 1]
         app = Kalender()

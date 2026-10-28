@@ -94,3 +94,45 @@ all apps share one look (terminal style, colors from your wallpaper via matugen)
 | [inquirist](https://github.com/danger-inc/inquirist) | launcher |
 
 dotfiles with the matching hyprland setup: [danger-inc/dotfiles](https://github.com/danger-inc/dotfiles)
+
+## In der Leiste (Waybar & Co.)
+
+`datist` hat eine schnelle Kommandozeile ohne Fenster (liest nur den lokalen Zwischenspeicher):
+
+```
+datist --next          # nächster Termin als eine Zeile
+datist --agenda 7      # die nächsten 7 Tage als Text
+datist --json 14       # dieselben Termine als JSON für eigene Skripte
+datist --waybar        # JSON für ein Waybar-Modul
+```
+
+Waybar-Modul (`config.jsonc`, dazu `"custom/datist"` in `modules-right`):
+
+```jsonc
+"custom/datist": {
+    "exec": "datist --waybar",
+    "return-type": "json",
+    "interval": 60,
+    "signal": 8,
+    "on-click": "datist",
+    "on-click-right": "datist --bar-hide",
+    "tooltip": true
+}
+```
+
+Klassen für das Styling: `none`, `later`, `today`, `soon` (≤ 15 min), `now` (läuft), dazu `exam` bei einer Prüfung in den nächsten 3 Tagen.
+
+Styling (damit der Block lesbar ist und zum Design passt, `style.css`; `@…` sind die Farben deines Designs):
+
+```css
+#custom-datist { color: @foreground; padding: 0 12px; margin: 6px 4px; border: 1px solid alpha(@primary, 0.55);
+                 border-radius: 6px; }
+#custom-datist:hover { background-color: alpha(@primary, 0.22); }
+#custom-datist.soon { color: @tertiary; border-color: @tertiary; }
+#custom-datist.now  { color: @on_primary; background-color: @primary; }
+```
+
+Rechtsklick öffnet ein Menü (Beispiel: `scripts/datist-menu.sh` mit wofi) zum Verstecken (`datist --bar-hide [once|series]`, `--bar-off`, `--bar-show-all`, `--bar-info`); `"signal": 8` lässt datist sie sofort
+aktualisieren. Wieder einblenden: im Menü oder unter datist → Einstellungen → „leiste & desktop“. Desktop-Karte ein/aus: `datist --desk`. Wer die linke Seite eng haben
+will, setzt `clock`, `custom/datist`, `pulseaudio` usw. in eine Gruppe (`"group/left"`), dann gilt der globale
+`"spacing"` nicht dazwischen.

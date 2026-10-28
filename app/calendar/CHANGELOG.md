@@ -1,5 +1,47 @@
 # datist – Änderungen
 
+## 1.12.0 (2026-10-28)
+- **Waybar: Rechtsklick öffnet ein Menü** (im Stil der anderen Leisten-Menüs): „diesen Termin verstecken“, bei Serien „diese Wiederholung“ oder „ganze Serie verstecken“, „alle Termine verstecken“ (die Leiste zeigt dann nur das Kalender-Symbol), „wieder zeigen“ und „einstellungen“. Neu auf der Kommandozeile: `datist --bar-hide [once|series]`, `--bar-off`, `--bar-on`, `--bar-show-all`, `--bar-info`.
+- **Neuer Reiter ⁵ „aufgaben“**: Google-Aufgaben anlegen, abhaken und löschen. Sind sie noch nicht aktiviert, steht dort die Erklärung (einmal neu anmelden, Tasks API im Cloud-Projekt) mit Knopf. Die Agenda zeigt nur noch fällige Aufgaben.
+- **Einstellungen überarbeitet**: Das Konto-Fenster hat jetzt Seiten – allgemein, google, kalender, erinnerungen, leiste & desktop. `datist --tab bar` öffnet direkt die Leisten-Seite.
+- **Desktop-Karte**: im -ist-Stil (Rahmen mit Titel wie in filist), Tastenkürzel Super+Shift+K, in datist die Taste `b`, auf der Kommandozeile `datist --desk`.
+- Bei schmalen Fenstern (unter 640 px) zeigen die Reiter nur noch Symbole.
+
+## 1.11.2 (2026-10-28)
+- **Termin in der Waybar verstecken**: Rechtsklick auf den Termin in der Leiste versteckt ihn dort (Serien als Ganzes); die Meldung bietet „Rückgängig“ an, die Leiste aktualisiert sich sofort. In den Einstellungen gibt es den Bereich „waybar · nächster termin“ mit einem Schalter für das ganze Modul und der Liste der versteckten Termine („wieder zeigen“). Im Termin selbst steht dazu der Haken „in der Waybar zeigen“.
+- **Waybar-Layout**: Der Termin-Block ist so hoch wie der Uhr-Chip, näher an der Uhr, und Sound und Helligkeit sitzen direkt daneben (die linke Seite ist jetzt eine Gruppe ohne den globalen Abstand).
+- Die versteckten Termine liegen in einer eigenen Datei (`bar.json`), damit die Kommandozeile und die laufende App sich nicht gegenseitig Einstellungen überschreiben.
+
+## 1.11.1 (2026-10-28)
+- **Konto-/Einstellungsfenster war viel zu breit** (über 2000 px, dadurch abgeschnitten und verschoben): Ein langer Erklärtext im Semester-Bereich hatte keinen Zeilenumbruch und erzwang seine volle Breite. Jetzt umbricht er, die Mindestbreite liegt bei ca. 520 px. Das Fenster gehört außerdem zur App (Fensterklasse `de.invincible.Datist` statt `python3`), damit eigene Fensterregeln greifen.
+- **Zahnrad (Einstellungen) fehlte im Halbfenster**: Die Kopfzeile ließ rechts Elemente abgeschnitten, wenn sie zu breit wurde (Zahnrad, Version, Schließen). Jetzt blendet sie bei Platzmangel zuerst Nebensächliches aus (KW-Anzeige, Abgleich-Anzeige, Prüfungs-Badge, ‹ heute ›), Zahnrad, Version, Tabs und ✕ bleiben immer sichtbar.
+- **Waybar-Modul**: Der nächste Termin war nahezu unsichtbar (fehlende Textfarbe). Er hat jetzt Systemfarben (`@foreground`, `@primary`), einen Rahmen wie die Leiste, Hover und Zustandsfarben (bald, läuft, Prüfung). Ein Klick öffnet datist.
+
+## 1.11.0 (2026-10-28)
+- **Mehrere Google-Konten**: Im Konto-Fenster unter „weitere google-konten“ lassen sich beliebig viele Konten hinzufügen. Jedes bekommt einen eigenen Namen (z. B. „Uni“); die E-Mail-Adresse wird nie angezeigt. Eigenes Token je Konto, Kalender und Änderungen bleiben getrennt und gehen immer ans richtige Konto. Läuft ein Konto ab, laufen die anderen weiter, oben steht „⚠ neu anmelden“ und der Klick erneuert genau dieses Konto. Das bisherige Konto bleibt unverändert das Hauptkonto.
+- **Google Aufgaben** (optional, Hauptkonto): „aufgaben aktivieren“ im Konto-Fenster meldet dich einmal mit der zusätzlichen Berechtigung neu an (die „Tasks API“ muss in deinem Cloud-Projekt aktiv sein, der Knopf „tasks api öffnen“ führt hin). Aufgaben mit Datum erscheinen in Woche und Monat (anklicken = abhaken) und in der Agenda; dort lassen sie sich anlegen („Blatt 4 abgeben bis freitag“), abhaken und löschen, auch offline.
+- **Gäste, Meet und Zeitzonen** im Termin: „gäste“ (E-Mail-Adressen, nur wer den Termin organisiert), „Google Meet-Link erstellen“ (Link steht danach mit öffnen/kopieren am Termin) und „zeitzone“ (z. B. America/New_York; die Uhrzeiten gelten dann dort, „bei dir: …“ zeigt deine Zeit). Es geht **keine Mail** an Gäste raus, außer du hakst beim Speichern „Einladungen senden“ an.
+- **Desktop-Karte**: Die nächsten Termine, Prüfungs-Countdown und offene Aufgaben dauerhaft auf dem Hintergrundbild, unter allen Fenstern (Einstellungen → „termine auf dem hintergrundbild“, Standard aus, Position wählbar, Standard oben links). Braucht Wayland mit layer-shell (Hyprland, Sway …) und gtk4-layer-shell.
+- **Schnelleingabe** versteht mehr: „nächsten Montag“, „übernächsten Freitag“, „nächste Woche Dienstag“, „in 3 Tagen / 2 Wochen / 1 Monat“, „am Freitag“, „um 14 Uhr“, „von 14 bis 16 Uhr“, „14:30“, „für 2h / 90min“, „ganztägig“ und englisch (next monday, friday 3pm, in 2 weeks). Ein Wort wie „Raum 14“ oder „Blatt 4“ bleibt Titel. Das gilt auch für „gehe zu“ (g).
+- Änderungen, die man während eines laufenden Abgleichs macht, gehen jetzt gleich danach raus (vorher erst beim nächsten Abgleich).
+
+## 1.10.0 (2026-10-28)
+- **Termine mit der Maus verschieben** (Woche, Tag, Monat): ziehen und auf ein anderes Feld loslassen. Das Ziel leuchtet mit Tag und Doppelstunde; die Dauer bleibt, in der Woche landet der Termin am Beginn der Doppelstunde, im Monat bleibt die Uhrzeit. Den **unteren Rand** eines Termins ziehen ändert die Dauer (Ende der Doppelstunde). Ein Klick ohne Ziehen öffnet den Termin wie bisher. Serientermine verschieben nur diese Wiederholung, Abo- und Feiertags-Termine sind geschützt. Mit `u` rückgängig.
+- **Überschneidungen**: Termine, die sich zeitlich überlappen, bekommen ein ⚡ in der Rahmenecke, in Tag und Woche steht dazu „überschneidet: …“. In der Agenda steht „mit …“.
+- **Feiertage und vorlesungsfreie Zeit**: Gesetzliche Feiertage (bundesweit, dazu das Bundesland im Konto-Fenster unter „semester“) erscheinen im eigenen Kalender „Feiertage & Semester“ (ausblendbar). Das Datum steht in der Woche und im Monat in der Warnfarbe. Aus deinen Semesterzeiten kommen Vorlesungsbeginn/-ende, freie Zeiträume und die Wochen-Kopfzeile „· vorlesungsfrei“; optional steht je Semester `"exams": [["2027-02-08", "2027-03-12"]]` für eine Prüfungsphase („· prüfungsphase“). Geschätzte Semester erzeugen keine Marken.
+- **Agenda** (neuer Tab ⁴, Taste 4): die nächsten 7, 14 oder 30 Tage, nach Tag gruppiert, mit Prüfungen oben. j/k wählt, ⏎ öffnet.
+- **Prüfungs-Countdown**: Oben in der Kopfleiste steht „! Name · 12 d“ für die nächste Prüfung (Klick springt hin, Tooltip nennt die nächsten fünf).
+- **Leistenanzeige / Kommandozeile** ohne Fenster: `datist --next`, `datist --agenda [N]`, `datist --json [N]` und `datist --waybar` (JSON für ein Waybar-Modul, Klassen `none`, `later`, `today`, `soon`, `now`, `exam`). Konfigurationsbeispiel in der README.
+
+## 1.9.0 (2026-10-28)
+- **Erinnerungen**: Eine Desktop-Meldung vor jedem Termin (Standard 10 min vorher, ganztägige nur auf Wunsch). Im Termin steht ein neues Feld „erinnerung“: frei eingeben, z. B. `30 min`, `2 h`, `1 tag`, `zum beginn` oder `keine`, leer = Standard. Der Standard-Vorlauf steht im Konto-Fenster („erinnerungen“) samt Test-Meldung. Der Vorlauf wird bei Google als Zusatzfeld am Termin gespeichert, nichts an Googles eigenen Erinnerungen ändert sich. Erinnerungen aus notist melden zum Zeitpunkt selbst. Läuft, solange datist im Hintergrund ist (startet beim Login).
+- **Suche** (Taste `/`): Titel, Ort, Notiz und Typ, mehrere Wörter müssen alle vorkommen; leer zeigt die nächsten Termine. ⏎ springt zum Termin, strg+⏎ öffnet ihn zum Bearbeiten.
+- **Rückgängig** (Taste `u` oder strg+z, bis zu 30 Schritte): Anlegen, Ändern und Löschen, auch Import. Bei Terminen in Google-Serien geht es nicht (der Serientermin liegt nur bei Google); dann sagt datist das klar. Änderungen von notist zählen nicht.
+- **Google-Anmeldung ohne Überraschung**: Ab 24 Stunden vor dem Ablauf (Testmodus: 7 Tage) erscheint oben „⏳ erneuern (noch N h)“ und eine Benachrichtigung mit dem Knopf „Jetzt erneuern“; ein Klick erneuert, der Abgleich läuft ohne Unterbrechung weiter. Das Konto-Fenster zeigt die Restzeit und hat „anmeldung erneuern“.
+- **Kalender-Abos (ICS)**: Beliebig viele Links (Uni-Stundenplan, Feiertage …) als eigene, nur lesbare Kalender, alle 30 Minuten aktualisiert (strg+r sofort), ohne Konto. Die Adresse kann ein Geheimnis enthalten und wird nie angezeigt, nur der Server.
+- **ICS-Import und -Export** im Konto-Fenster: Datei in einen schreibbaren Kalender importieren (mit Serien und Ausnahmen; nach Google höchstens 300 Termine) und jeden Kalender als `.ics` speichern.
+- Gespeicherte Daten (Termine, Abo-Adressen) sind jetzt nur für dich lesbar (Rechte 0600).
+
 ## 1.8.1 (2026-10-27)
 - **Alt+Zahl wechselt den Tab**: Alt+1 Tag, Alt+2 Woche, Alt+3 Monat – auch beim Tippen in einem Feld (im Termin-Editor wählen 1–7 die DS, solange man nicht in einem Feld tippt; Alt+1–7 geht immer).
 
