@@ -10,6 +10,12 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(1, os.path.dirname(HERE))           # rice-apps: tui, glass
 
+try:                           # glibc: wenige malloc-Arenen, der Daemon bleibt schlank
+    import ctypes
+    ctypes.CDLL("libc.so.6").mallopt(-8, 2)        # M_ARENA_MAX
+except (OSError, AttributeError):
+    pass
+
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
@@ -1342,6 +1348,8 @@ class Kalender(AcctMixin, Gtk.Application):
                             hints=(("hjkl", "nav"), ("n", "neu"), ("a", "schnell"), ("t", "heute"), ("?", "hilfe")))
         win.APP_ID = APP_ID
         self.win = win
+        win.connect("notify::visible", lambda w, _p: w.get_visible() or
+                    GLib.timeout_add_seconds(3, lambda: (tui.trim_memory(), False)[-1]))   # versteckt: Heap zurückgeben
         self.kw_badge = label("", "kw-badge")
         self.sync_badge = label("", "sync-badge")
         self.prev_btn = tui.Button("‹", lambda: self.step_period(-1), tooltip="voriger Zeitraum (H)")
