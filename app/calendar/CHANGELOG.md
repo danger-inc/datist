@@ -1,5 +1,8 @@
 # datist – Änderungen
 
+## 1.13.0 (2026-11-01)
+- **Scroll-Ende**: Wer am Ende einer Seite weiterscrollt, sieht aus der Kante einen Verlauf aus ░ ▒ ▓ █ aufsteigen, am Mauszeiger am höchsten. Die Liste bewegt sich dabei nicht und der Effekt läuft ohne Überschwingen aus. Er erscheint nur, wenn kein umgebendes Scroll-Fenster mehr weiterscrollen kann. Abschalten: `"scroll_end": false` in ~/.config/rice-apps/settings.json oder Energiesparmodus.
+
 ## 1.12.0 (2026-10-28)
 - **Waybar: Rechtsklick öffnet ein Menü** (im Stil der anderen Leisten-Menüs): „diesen Termin verstecken“, bei Serien „diese Wiederholung“ oder „ganze Serie verstecken“, „alle Termine verstecken“ (die Leiste zeigt dann nur das Kalender-Symbol), „wieder zeigen“ und „einstellungen“. Neu auf der Kommandozeile: `datist --bar-hide [once|series]`, `--bar-off`, `--bar-on`, `--bar-show-all`, `--bar-info`.
 - **Neuer Reiter ⁵ „aufgaben“**: Google-Aufgaben anlegen, abhaken und löschen. Sind sie noch nicht aktiviert, steht dort die Erklärung (einmal neu anmelden, Tasks API im Cloud-Projekt) mit Knopf. Die Agenda zeigt nur noch fällige Aufgaben.
