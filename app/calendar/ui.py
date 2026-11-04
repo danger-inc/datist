@@ -1279,6 +1279,23 @@ class Kalender(AcctMixin, Gtk.Application):
         act = Gio.SimpleAction.new("toggle-desk", None)
         act.connect("activate", lambda *_: self.toggle_desk())
         self.add_action(act)
+        act = Gio.SimpleAction.new("quick-add", GLib.VariantType.new("s"))      # datist --add "text" (läuft datist schon)
+        act.connect("activate", lambda a, v: self.quick_add_text(v.get_string()))
+        self.add_action(act)
+
+    def quick_add_text(self, text):
+        """Termin aus einem Satz anlegen, ohne Fenster (von `datist --add` / inquirist)."""
+        import quickadd
+        if not self.win:
+            self.build()
+        try:
+            ev = quickadd.create(text, self.store)
+        except ValueError as e:
+            print("datist --add:", e, file=sys.stderr)
+            return
+        self.redraw()
+        if gcal.logged_in():
+            GLib.timeout_add(800, lambda: self.sync() and False)
 
     def show_tab_now(self, tid):
         if not self.win:

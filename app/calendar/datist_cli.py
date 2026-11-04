@@ -193,7 +193,21 @@ def cmd_agenda(days, as_json):
         print(f"  {when:<11} {'⚡ ' if o.get('conflict') else ''}{o.get('title')}" + (f" · {o['location']}" if o.get("location") else ""))
 
 
+def cmd_add(text):
+    """Termin aus einem Satz anlegen (datist läuft nicht – sonst übernimmt das die App per D-Bus)."""
+    import quickadd
+    try:
+        ev = quickadd.create(text)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"angelegt: {ev['title']} · {quickadd.describe(ev)}")
+    return 0
+
+
 def main(argv):
+    if "--add" in argv:
+        return cmd_add(" ".join(argv[argv.index("--add") + 1:]))
     if "--waybar" in argv:
         cmd_waybar()
     elif "--bar-hide" in argv:
@@ -220,4 +234,4 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    sys.exit(main(sys.argv[1:]))
