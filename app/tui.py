@@ -852,6 +852,7 @@ class TuiWindow(Gtk.ApplicationWindow):
         self.theme = Theme.get()
         self.on_refresh = None
         self.on_tab = None
+        self.on_escape = None       # → True, wenn die App Esc selbst verbraucht hat
 
         top = hbox(spacing=2)
         top.add_css_class("topbar")
@@ -923,6 +924,11 @@ class TuiWindow(Gtk.ApplicationWindow):
             self._set_app_id()
         finally:
             self.on_show()
+        if os.name == "nt":                         # Titelleiste in Designfarben (auch nach Designwechsel)
+            GLib.idle_add(lambda: (getattr(glass, "win32_style", lambda w: None)(self), False)[1])
+            if not getattr(self, "_win_style_hook", False):
+                self._win_style_hook = True
+                self.theme.listeners.append(lambda: getattr(glass, "win32_style", lambda w: None)(self))
 
     def _set_app_id(self, *_):
         if self.APP_ID:
@@ -996,9 +1002,18 @@ class TuiWindow(Gtk.ApplicationWindow):
                 self.on_tab(tid)
 
     def _key(self, _c, kv, _code, state):
+        if kv in (Gdk.KEY_Alt_L, Gdk.KEY_Alt_R, Gdk.KEY_Control_L, Gdk.KEY_Control_R, Gdk.KEY_Shift_L, Gdk.KEY_Shift_R,
+                  Gdk.KEY_Super_L, Gdk.KEY_Super_R, Gdk.KEY_ISO_Level3_Shift):
+            # GTK schaltet bei jeder Taste den Fokusrahmen ein → der zufällig fokussierte Kopf-Knopf (z. B. freunde) leuchtete bei Alt auf
+            GLib.idle_add(lambda: self.set_focus_visible(False) and False)
+            return False
+        if state & (Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.CONTROL_MASK):      # Alt+Zahl usw. ebenso
+            GLib.idle_add(lambda: self.set_focus_visible(False) and False)
         focus = self.get_focus()
-        in_entry = isinstance(focus, Gtk.Text) or isinstance(focus, Gtk.Entry)
+        in_entry = isinstance(focus, (Gtk.Text, Gtk.Entry, Gtk.TextView))      # auch mehrzeilige Felder (Chat): Tastenkürzel nicht auslösen
         if kv == Gdk.KEY_Escape:
+            if self.on_escape and self.on_escape():   # App schließt erst eigene Ebenen (Editor, Ansicht)
+                return True
             if in_entry:
                 self.set_focus(None)
             elif self.ESC_CLOSES:

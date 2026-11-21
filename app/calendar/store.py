@@ -21,6 +21,8 @@ DATA = os.path.expanduser("~/.local/share/kalender/data")   # bewusst nicht in r
 NOTIST_FILE = "notist.json"      # von notist geschrieben (Erinnerungen), hier nur gelesen
 NOTIST_LINK = "notist:"
 NOTIST_MINUTES = 15
+STUDIST_FILE = "studist.json"    # von studist geschrieben (offene Fristen), hier nur gelesen
+STUDIST_LINK = "studist:"
 LOCAL_CAL = {"id": "local", "name": "Lokal (nur dieser Rechner)", "color": None, "role": "owner"}
 
 
@@ -650,12 +652,66 @@ class Store:
     # ----- Erinnerungen aus notist -----
     def notist_events(self):
         """nid → Termin, erkannt am Link "notist:<id>" (bleibt auch bei Google erhalten)."""
+        return self.linked_events(NOTIST_LINK)
+
+    def linked_events(self, prefix):
         out = {}
         for ev in list(self.google.values()) + list(self.local.values()) + self.pending_events():
             link = ev.get("link") or ""
-            if link.startswith(NOTIST_LINK) and ev.get("status") != "cancelled":
-                out.setdefault(link[len(NOTIST_LINK):], ev)
+            if link.startswith(prefix) and ev.get("status") != "cancelled":
+                out.setdefault(link[len(prefix):], ev)
         return out
+
+    def sync_studist(self):
+        """studist legt offene Fristen in data/studist.json ab ({id: {title, date}}) → ganztägige Termine; Einträge mit
+        start/end (HH:MM, Lernblöcke) werden Termine mit Uhrzeit (icon, cat, notes optional).
+        studist bestimmt, datist folgt (wie bei notist). True, wenn sich etwas geändert hat."""
+        data = _load(STUDIST_FILE, None)
+        if not isinstance(data, dict) or not isinstance(data.get("items"), dict):
+            return False
+        cal = data.get("cal") or "local"
+        if cal not in [c["id"] for c in self.writable()]:
+            cal = "local"
+        have = self.linked_events(STUDIST_LINK)
+        changed = False
+        self._rec = False
+        try:
+            for fid, it in data["items"].items():
+                try:
+                    day = dt.date.fromisoformat(it["date"])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                title = it.get("icon", "󰄵") + " " + (it.get("title") or "Frist")
+                timed = bool(it.get("start") and it.get("end"))      # Lernblöcke: mit Uhrzeit
+                if timed:
+                    try:
+                        start, end = (iso(dt.datetime.combine(day, dt.time.fromisoformat(it[k]))) for k in ("start", "end"))
+                    except ValueError:
+                        continue
+                else:
+                    start, end = day.isoformat(), (day + dt.timedelta(days=1)).isoformat()
+                ev = have.pop(fid, None)
+                if (ev and ev["cal"] == cal and ev.get("title") == title and bool(ev.get("allday")) != timed
+                        and ev["start"][:16] == start[:16] and ev["end"][:16] == end[:16]):
+                    continue
+                if ev and ev["cal"] != cal:
+                    self.delete_event(ev)
+                    ev = None
+                new = {"location": "", "notes": it.get("notes", "Frist aus studist"), "cat": it.get("cat", "pruefung"),
+                       "tone": "", "rrule": None,
+                       **(ev or {}), "cal": cal, "title": title, "allday": not timed, "start": start, "end": end,
+                       "link": STUDIST_LINK + fid}
+                if not ev:
+                    new.pop("uid", None)
+                    new.pop("gid", None)
+                self.save_event(new)
+                changed = True
+            for ev in have.values():             # erledigt oder gelöscht
+                self.delete_event(ev)
+                changed = True
+        finally:
+            self._rec = True
+        return changed
 
     def sync_notist(self):
         """notist legt seine Erinnerungen in data/notist.json ab; hier werden daraus Termine (anlegen, ändern,

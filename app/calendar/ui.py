@@ -1529,12 +1529,14 @@ class Kalender(AcctMixin, Gtk.Application):
     def watch_notist(self):
         """notist schreibt seine Erinnerungen nach data/notist.json → als Termine übernehmen, sobald sie sich ändert."""
         self.take_notist()
-        try:
-            f = Gio.File.new_for_path(os.path.join(st.DATA, st.NOTIST_FILE))
-            self._notist_mon = f.monitor_file(Gio.FileMonitorFlags.WATCH_MOVES, None)
-            self._notist_mon.connect("changed", lambda *_: self._notist_soon())
-        except GLib.Error:
-            pass
+        self._notist_mons = []                   # notist.json + studist.json (Fristen)
+        for name in (st.NOTIST_FILE, st.STUDIST_FILE):
+            try:
+                mon = Gio.File.new_for_path(os.path.join(st.DATA, name)).monitor_file(Gio.FileMonitorFlags.WATCH_MOVES, None)
+                mon.connect("changed", lambda *_: self._notist_soon())
+                self._notist_mons.append(mon)
+            except GLib.Error:
+                pass
         self._notist_id = None
 
     def _notist_soon(self):
@@ -1545,7 +1547,7 @@ class Kalender(AcctMixin, Gtk.Application):
     def take_notist(self):
         self._notist_id = None
         try:
-            if self.store.sync_notist() and self.store.pending:
+            if (self.store.sync_notist() | self.store.sync_studist()) and self.store.pending:
                 GLib.timeout_add(800, lambda: self.sync() and False)      # gleich zu Google
         except Exception as e:  # noqa: BLE001 – notist ist ein Extra, darf datist nie stören
             print("notist:", e, file=sys.stderr)

@@ -1,5 +1,11 @@
 # datist – Änderungen
 
+## 1.14.1 (2026-11-20)
+- **Lernblöcke aus studist**: Lernpläne aus studist erscheinen als Termine mit Uhrzeit (󰑴 Lernen: …). Hakst du einen Block in studist ab oder änderst den Plan, zieht datist mit.
+
+## 1.14.0 (2026-11-19)
+- **Fristen aus studist**: Offene Fristen aus dem Studienplaner studist erscheinen als ganztägige Termine (󰄵) im Kalender. Hakst du sie in studist ab oder löschst sie, verschwinden sie hier wieder.
+
 ## 1.13.0 (2026-11-01)
 - **Scroll-Ende**: Wer am Ende einer Seite weiterscrollt, sieht aus der Kante einen Verlauf aus ░ ▒ ▓ █ aufsteigen, am Mauszeiger am höchsten. Die Liste bewegt sich dabei nicht und der Effekt läuft ohne Überschwingen aus. Er erscheint nur, wenn kein umgebendes Scroll-Fenster mehr weiterscrollen kann. Abschalten: `"scroll_end": false` in ~/.config/rice-apps/settings.json oder Energiesparmodus.
 
