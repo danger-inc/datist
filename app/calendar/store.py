@@ -23,6 +23,7 @@ NOTIST_LINK = "notist:"
 NOTIST_MINUTES = 15
 STUDIST_FILE = "studist.json"    # von studist geschrieben (offene Fristen), hier nur gelesen
 STUDIST_LINK = "studist:"
+HANDY_FILE = "handy-edits.json"  # von studist geschrieben (Termin-Änderungen aus der Handy-App), hier angewendet
 LOCAL_CAL = {"id": "local", "name": "Lokal (nur dieser Rechner)", "color": None, "role": "owner"}
 
 
@@ -712,6 +713,53 @@ class Store:
         finally:
             self._rec = True
         return changed
+
+    def apply_handy(self):
+        """Änderungen aus der studist-Handy-App ({"items": [{id, uid, occ, op, set}]}) je id einmal anwenden.
+        Nur geänderte Felder kommen mit (Handy kennt Ort/Notizen ggf. gekürzt). True, wenn sich etwas geändert hat."""
+        data = _load(HANDY_FILE, None)
+        if not isinstance(data, dict):
+            return False
+        done = self.settings.setdefault("handy_done", [])
+        new = [it for it in data.get("items", []) if isinstance(it, dict) and it.get("id") and it["id"] not in done]
+        if not new:
+            return False
+        changed = False
+        for it in new:
+            done.append(it["id"])                # vorher merken: eine kaputte Änderung soll nicht jedes Mal wieder scheitern
+            try:
+                changed |= self._apply_handy(it)
+            except (KeyError, ValueError, TypeError) as e:
+                print("handy-edits:", it.get("id"), e)
+        del done[:-500]
+        self.save_settings()
+        return changed
+
+    def _apply_handy(self, it):
+        base = self.find(it["uid"])
+        if not base or self.is_readonly(base):
+            return False
+        occ = parse_when(it["occ"], len(it["occ"]) == 10) if it.get("occ") else None
+        orig = {**base, "occ": occ} if base.get("rrule") and occ else None
+        scope = "instance" if orig else "single"     # Handy ändert nur diesen einen Termin, nie die Serie
+        if it.get("op") == "delete":
+            self.delete_event(base, scope, orig)
+            return True
+        f = it.get("set") or {}
+        ev = dict(base)
+        for k in ("title", "location", "notes", "cat", "tone"):
+            if k in f:
+                ev[k] = str(f[k] or "")
+        if orig or {"start", "end", "allday"} & f.keys():
+            allday = bool(f.get("allday", base.get("allday")))
+            dur = parse_when(base["end"], base.get("allday")) - parse_when(base["start"], base.get("allday"))
+            s = parse_when(f["start"], allday) if "start" in f else occ or parse_when(base["start"], allday)
+            e = parse_when(f["end"], allday) if "end" in f else s + dur
+            if e <= s:
+                raise ValueError("ende vor beginn")
+            ev.update(allday=allday, start=iso(s, allday), end=iso(e, allday))
+        self.save_event(ev, scope, orig)
+        return True
 
     def sync_notist(self):
         """notist legt seine Erinnerungen in data/notist.json ab; hier werden daraus Termine (anlegen, ändern,

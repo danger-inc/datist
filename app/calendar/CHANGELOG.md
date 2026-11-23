@@ -1,5 +1,8 @@
 # datist – Änderungen
 
+## 1.15.0 (2026-11-23)
+- **Termine vom Handy ändern**: Was du in der studist-App am Handy an einem Termin änderst (Titel, Zeit, Ort, Notizen, Typ, Farbe) oder löschst, übernimmt datist und schickt es wie gewohnt an Google. Bei Serien gilt die Änderung nur für den einen Termin. Läuft datist gerade nicht, holt es das beim nächsten Start nach.
+
 ## 1.14.1 (2026-11-20)
 - **Lernblöcke aus studist**: Lernpläne aus studist erscheinen als Termine mit Uhrzeit (󰑴 Lernen: …). Hakst du einen Block in studist ab oder änderst den Plan, zieht datist mit.
 
